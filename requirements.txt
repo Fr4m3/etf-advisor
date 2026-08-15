@@ -1,0 +1,10 @@
+# Dipendenze dell'applicazione ETF Advisor (radice repo per deploy)
+streamlit>=1.30
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+plotly>=5.18
+yfinance>=0.2.40
+requests>=2.31
+matplotlib>=3.7
+fpdf2>=2.8

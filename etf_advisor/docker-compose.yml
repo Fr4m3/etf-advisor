@@ -1,0 +1,11 @@
+services:
+  etf-advisor:
+    build: .
+    image: etf-advisor:latest
+    container_name: etf-advisor
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    # Per uscire dai log di rete e velocizzare l'avvio in ambiente chiuso:
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true

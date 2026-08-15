@@ -1,0 +1,6 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+# Utile in alcuni ambienti containerizzati
+enableCORS = false

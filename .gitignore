@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Streamlit
+.stcache/
+
+# File generati / log
+*.log
+*.pdf
+sample_report.pdf
+
+# Ambienti
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
