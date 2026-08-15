@@ -37,6 +37,40 @@ REGION_TO_MACRO = {
     "Globale": "Altri Sviluppati",
 }
 
+# Mappa nomi Paese (JustETF IT) -> macro-region usate dall'app
+COUNTRY_TO_MACRO = {
+    "Stati Uniti": "USA", "Canada": "USA",
+    "Germania": "Europa", "Francia": "Europa", "Italia": "Europa",
+    "Spagna": "Europa", "Paesi Bassi": "Europa", "Svezia": "Europa",
+    "Belgio": "Europa", "Austria": "Europa", "Finlandia": "Europa",
+    "Norvegia": "Europa", "Danimarca": "Europa", "Portogallo": "Europa",
+    "Irlanda": "Europa", "Lussemburgo": "Europa", "Polonia": "Europa",
+    "Europa": "Europa", "Zona Euro": "Europa",
+    "Giappone": "Giappone", "Regno Unito": "Regno Unito",
+    "Svizzera": "Svizzera", "Australia": "Australia",
+    "Nuova Zelanda": "Pacifico Sviluppato", "Singapore": "Pacifico Sviluppato",
+    "Hong Kong": "Pacifico Sviluppato",
+    "Cina": "Cina", "India": "India",
+    "Brasile": "Emergenti", "Messico": "Emergenti", "Sudafrica": "Emergenti",
+    "Russia": "Emergenti", "Turchia": "Emergenti", "Corea": "Emergenti",
+    "Taiwan": "Emergenti", "Tailandia": "Emergenti", "Indonesia": "Emergenti",
+    "Malesia": "Emergenti", "Filippine": "Emergenti", "Cile": "Emergenti",
+    "Colombia": "Emergenti", "Perù": "Emergenti", "Egitto": "Emergenti",
+    "Ungheria": "Emergenti", "Repubblica Ceca": "Emergenti", "Grecia": "Emergenti",
+    "Altri": "Altri Sviluppati", "Altro": "Altri Sviluppati",
+}
+
+# Mappa nomi Settore (JustETF IT) -> settori usati dall'app
+SECTOR_MAP = {
+    "Informatica": "Tecnologia", "Finanza": "Finanziari",
+    "Industria": "Industria",
+    "Beni di consumo non ciclici": "Staples (Beni di Base)",
+    "Beni di consumo ciclici": "Consumi Discrezionali",
+    "Salute": "Salute", "Energia": "Energia", "Materiali": "Materiali",
+    "Immobiliare": "Real Estate", "Telecomunicazioni": "Comunicazioni",
+    "Utility": "Utilities", "Altri": "Altro", "Altro": "Altro",
+}
+
 
 def etf_macro_vector(etf: dict) -> dict:
     """Vettore dell'ETF nei macro-bucket geografici (somma = 1)."""

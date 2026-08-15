@@ -132,14 +132,18 @@ def fetch_prices(tickers, period: str = "5y", use_live: bool = True) -> pd.DataF
 # Scraping JustETF (best-effort, opzionale)
 # ---------------------------------------------------------------------------
 def fetch_justetf(isin: str, timeout: int = 15) -> dict:
-    """Tenta di recuperare TER e dimensione fondo da JustETF per ISIN.
+    """Tenta di recuperare metadati da JustETF per ISIN.
 
-    Restituisce {"isin","name","ter","fund_size_m","ok":bool}. Best-effort:
-    in caso di blocco/errore ritorna ok=False con i campi vuoti.
+    Restituisce {"isin","name","ter","fund_size_m","region","sectors","ok"}.
+    `region`/`sectors` sono dict {macro_label: frazione} ricavati dalle tabelle
+    "Paesi"/"Settori" della scheda JustETF (best-effort). In caso di
+    blocco/errore ritorna ok=False con campi vuoti.
     """
-    out = {"isin": isin, "name": None, "ter": None, "fund_size_m": None, "ok": False}
+    out = {"isin": isin, "name": None, "ter": None,
+           "fund_size_m": None, "region": {}, "sectors": {}, "ok": False}
     try:
         import requests, re
+        from finance import COUNTRY_TO_MACRO, SECTOR_MAP
         url = f"https://www.justetf.com/it/etf-profile.html?isin={isin}"
         headers = {
             "User-Agent": (
@@ -153,6 +157,10 @@ def fetch_justetf(isin: str, timeout: int = 15) -> dict:
         if r.status_code != 200:
             return out
         html = r.text
+        # Nome del fondo dal <title>
+        mt = re.search(r"<title>([^|<]+)", html)
+        if mt:
+            out["name"] = mt.group(1).strip()
         # TER: pattern "TER: 0,20 %" (notazione europea)
         m = re.search(r"TER[:\s]+([0-9]+,[0-9]+)\s*%", html)
         if m:
@@ -161,8 +169,42 @@ def fetch_justetf(isin: str, timeout: int = 15) -> dict:
         m = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})*)\s*mil\.?\s*€", html)
         if m:
             out["fund_size_m"] = float(m.group(1).replace(".", ""))
-        out["name"] = ETF_BY_ISIN_NAME(isin)
-        out["ok"] = out["ter"] is not None or out["fund_size_m"] is not None
+        # Paesi -> regioni (macro-bucket dell'app)
+        cnames = re.findall(
+            r'tl_etf-holdings_countries_value_name">([^<]+)</td>', html)
+        cpcts = re.findall(
+            r'tl_etf-holdings_countries_value_percentage">([0-9]+,[0-9]+)%', html)
+        region = {}
+        for nm, pc in zip(cnames, cpcts):
+            nm = nm.strip()
+            try:
+                val = float(pc.replace(",", ".")) / 100.0
+            except ValueError:
+                continue
+            bucket = COUNTRY_TO_MACRO.get(nm, "Altri Sviluppati")
+            region[bucket] = region.get(bucket, 0.0) + val
+        # Settori -> settori dell'app
+        snames = re.findall(
+            r'tl_etf-holdings_sectors_value_name">([^<]+)</td>', html)
+        spcts = re.findall(
+            r'tl_etf-holdings_sectors_value_percentage">([0-9]+,[0-9]+)%', html)
+        sectors = {}
+        for nm, pc in zip(snames, spcts):
+            nm = nm.strip()
+            try:
+                val = float(pc.replace(",", ".")) / 100.0
+            except ValueError:
+                continue
+            bucket = SECTOR_MAP.get(nm, "Altro")
+            sectors[bucket] = sectors.get(bucket, 0.0) + val
+        out["region"] = region
+        out["sectors"] = sectors
+        out["name"] = out["name"] or ETF_BY_ISIN_NAME(isin)
+        out["ok"] = any([
+            out["ter"] is not None,
+            out["fund_size_m"] is not None,
+            bool(region), bool(sectors),
+        ])
     except Exception:
         pass
     return out

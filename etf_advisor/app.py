@@ -621,65 +621,164 @@ def page_report():
 # ===========================================================================
 # PAGINA 4 — IL MIO PORTAFOGLIO (analisi holdings inseriti dall'utente)
 # ===========================================================================
+def _resolve_holding(code):
+    """Restituisce (etf_dict, prices_or_None) per un codice (ticker o ISIN).
+
+    Se il codice e' nell'universo usa i metadati noti; altrimenti prova a
+    recuperare metadati (JustETF per ISIN) e/o prezzi (Yahoo per ticker).
+    """
+    code = str(code).strip().upper()
+    if code in ETF_BY_TICKER:
+        return ETF_BY_TICKER[code], None
+    if code in ETF_BY_ISIN:
+        return ETF_BY_ISIN[code], None
+    # ETF personalizzato (non nell'universo)
+    is_isin = bool(re.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$", code))
+    meta = data_fetcher.fetch_justetf(code) if is_isin else None
+    prices = None
+    if not is_isin:
+        try:
+            p = data_fetcher.fetch_prices([code], "5y", True)
+            if p is not None and not p.empty and p.shape[1] > 0:
+                prices = p
+        except Exception:
+            prices = None
+    region = (meta or {}).get("region") or {"Sconosciuto": 1.0}
+    sectors = (meta or {}).get("sectors") or {"Altro": 1.0}
+    etf = {
+        "ticker": code, "name": (meta or {}).get("name") or code,
+        "asset_class": "Equity", "category": "Personalizzato",
+        "region": region, "sectors": sectors,
+        "ter": (meta or {}).get("ter") or 0.0,
+        "fund_size_m": (meta or {}).get("fund_size_m") or 0,
+        "accumulation": True, "exp_return": 0.06, "vol": 0.15,
+        "yf_ticker": code if prices is not None else None,
+        "custom": True, "meta_ok": bool(meta and meta.get("ok")),
+        "_prices": prices,
+    }
+    return etf, prices
+
+
 def page_my_portfolio():
     st.markdown('<div class="big-title">4 · Il mio portafoglio</div>',
                 unsafe_allow_html=True)
     st.markdown("Inserisci gli ETF che possiedi e l'importo investito: il sistema "
                 "calcola esposizione **geografica** e **settoriale**, i **costi (TER)** "
                 "e — se i prezzi sono disponibili — **Sharpe, volatilità e drawdown** "
-                "del *tuo* portafoglio.")
+                "del *tuo* portafoglio. Puoi usare gli ETF dell'universo oppure "
+                "incollare un **ISIN** o un **ticker Yahoo** (es. `IE00BK5BQT80` o "
+                "`VWCE.DE`): i metadati vengono recuperati automaticamente da "
+                "JustETF / Yahoo Finance.")
+    st.caption("Suggerimento: incolla un ISIN per ottenere esposizione geografica/"
+               "settoriale e TER da JustETF; incolla un ticker yfinance (es. VWCE.DE) "
+               "per ottenere anche le serie storiche dei prezzi.")
 
-    if "my_holdings" not in st.session_state:
-        st.session_state.my_holdings = []
-    df0 = (pd.DataFrame(st.session_state.my_holdings)
-           if st.session_state.my_holdings
-           else pd.DataFrame(columns=["Ticker", "Importo (€)"]))
+    if "holdings_editor" not in st.session_state:
+        st.session_state["holdings_editor"] = pd.DataFrame(columns=["Codice", "Importo (€)"])
+
+    def _append(code, amt):
+        df = st.session_state["holdings_editor"]
+        st.session_state["holdings_editor"] = pd.concat(
+            [df, pd.DataFrame([{"Codice": code, "Importo (€)": amt}])],
+            ignore_index=True)
+
+    st.markdown("**Aggiungi rapido dall'universo:**")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        q_sel = st.selectbox("ETF dell'universo",
+                             [f"{e['ticker']} — {e['name']}" for e in ETF_UNIVERSE],
+                             label_visibility="collapsed")
+    with c2:
+        q_amt = st.number_input("Importo (€)", 0, step=100, value=1000,
+                                label_visibility="collapsed")
+    with c3:
+        if st.button("➕ Aggiungi"):
+            _append(q_sel.split(" — ")[0], q_amt)
+
+    st.markdown("**Oppure incolla un ISIN / ticker personalizzato:**")
+    c4, c5, c6 = st.columns([2, 1, 1])
+    with c4:
+        cust = st.text_input("ISIN o ticker (es. IE00BK5BQT80 / VWCE.DE)",
+                             label_visibility="collapsed")
+    with c5:
+        cust_amt = st.number_input("Importo pers. (€)", 0, step=100, value=1000,
+                                   key="cust_amt", label_visibility="collapsed")
+    with c6:
+        if st.button("➕ Aggiungi personalizzato") and cust.strip():
+            _append(cust.strip().upper(), cust_amt)
+
     edited = st.data_editor(
-        df0, num_rows="dynamic",
+        st.session_state["holdings_editor"], num_rows="dynamic",
         column_config={
-            "Ticker": st.column_config.SelectboxColumn(
-                "ETF", options=[e["ticker"] for e in ETF_UNIVERSE], required=True),
-            "Importo (€)": st.column_config.NumberColumn(
-                "Importo investito (€)", min_value=0, step=100),
+            "Codice": st.column_config.TextColumn("ISIN / Ticker"),
+            "Importo (€)": st.column_config.NumberColumn("Importo investito (€)",
+                                                         min_value=0, step=100),
         },
         use_container_width=True, key="holdings_editor",
     )
-    st.session_state.my_holdings = edited.to_dict("records")
 
     if st.button("📊 Analizza il mio portafoglio", type="primary"):
-        holdings = [{"ticker": r["Ticker"], "amount": float(r["Importo (€)"] or 0)}
-                    for _, r in edited.iterrows()
-                    if r.get("Ticker") and (r.get("Importo (€)") or 0) > 0]
-        if not holdings:
+        rows = [r for _, r in edited.iterrows()
+                if str(r.get("Codice", "")).strip() and (r.get("Importo (€)") or 0) > 0]
+        if not rows:
             st.warning("Aggiungi almeno un ETF con importo > 0.")
             return
-        total = sum(h["amount"] for h in holdings)
-        weights = {h["ticker"]: h["amount"] / total for h in holdings}
+        amt = {}
+        for r in rows:
+            cc = str(r["Codice"]).strip().upper()
+            amt[cc] = amt.get(cc, 0.0) + float(r["Importo (€)"])
+        total = sum(amt.values())
+        weights = {c: v / total for c, v in amt.items()}
 
-        # Esposizioni e costi (da metadati di riferimento)
-        geo = aggregate_exposure(weights, "region")
-        sec = aggregate_exposure(weights, "sectors")
-        wter = weighted_ter(weights)
-        cost = weighted_cost_eur(weights, total)
+        # Risolvi metadati per ogni codice
+        lookup = {c: _resolve_holding(c)[0] for c in weights}
 
-        # Metriche storiche (se i prezzi ci sono)
-        rb = st.session_state.get("rebalance", "none")
-        tickers = list(weights.keys())
-        prices = _cached_prices(tuple(tickers), "5y", True)
-        returns = daily_returns(prices).dropna()
-        have_prices = len(returns) > 20 and returns.shape[1] > 0
+        def _agg(w, key):
+            out = {}
+            for c, frac in w.items():
+                for k, v in lookup[c].get(key, {}).items():
+                    out[k] = out.get(k, 0.0) + frac * v
+            return out
+        geo = _agg(weights, "region")
+        sec = _agg(weights, "sectors")
+        wter = sum(weights[c] * lookup[c]["ter"] for c in weights)
+        cost = sum(weights[c] * total * lookup[c]["ter"] / 100.0 for c in weights)
+
+        # Prezzi: universo via _cached_prices, custom da fetch diretto
+        price_cols = {}
+        known = [c for c in weights if not lookup[c].get("custom")]
+        if known:
+            pr = _cached_prices(tuple(known), "5y", True)
+            for c in known:
+                yf = lookup[c]["yf_ticker"]
+                if yf in pr.columns and pr[yf].notna().sum() > 20:
+                    price_cols[c] = pr[yf]
+        for c in weights:
+            if c in price_cols:
+                continue
+            p = lookup[c].get("_prices")
+            if p is not None and not p.empty and p.columns[0] in p and \
+               p[p.columns[0]].notna().sum() > 20:
+                price_cols[c] = p[p.columns[0]]
+
+        have_prices = bool(price_cols) and \
+            pd.DataFrame(price_cols).dropna().shape[0] > 20
+        pmat = pd.DataFrame(price_cols).dropna() if price_cols else pd.DataFrame()
         if have_prices:
-            pseries = portfolio_price_series(prices, weights, rb)
+            rb = st.session_state.get("rebalance", "none")
+            weights_p = {c: weights[c] for c in pmat.columns}
+            pseries = portfolio_price_series(pmat, weights_p, rb)
             psr = pseries.pct_change().dropna()
             ann_ret = float(psr.mean() * 252)
             ann_vol = float(psr.std() * np.sqrt(252))
             sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
             mdd = max_drawdown(pseries)
+            returns = daily_returns(pmat).dropna()
         else:
             ann_ret = ann_vol = sharpe = mdd = None
+            returns = pd.DataFrame()
 
         st.markdown(f"**Capitale totale:** {total:,.0f} €")
-        # Metriche
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("TER medio", f"{wter:.3f}%")
         m2.metric("Costo stimato", f"{cost:,.2f} €/anno")
@@ -708,25 +807,35 @@ def page_my_portfolio():
                 fig_sec.update_traces(textinfo="percent+label")
                 st.plotly_chart(fig_sec, use_container_width=True)
 
-        # Tabella holdings
         st.markdown("#### 📋 Composizione inserita")
-        rows = []
-        for t, w in sorted(weights.items(), key=lambda x: -x[1]):
-            e = ETF_BY_TICKER[t]
-            rows.append({
-                "Ticker": t, "Nome": e["name"], "Importo (€)": round(w * total, 2),
+        rows_out = []
+        for c, w in sorted(weights.items(), key=lambda x: -x[1]):
+            e = lookup[c]
+            rows_out.append({
+                "Codice": c, "Nome": e["name"], "Importo (€)": round(w * total, 2),
                 "Peso (%)": round(w * 100, 2), "TER (%)": e["ter"],
                 "Costo €/anno": round(w * total * e["ter"] / 100.0, 2),
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows_out), use_container_width=True, hide_index=True)
 
-        # Monte Carlo (solo se abbiamo i prezzi)
+        # Note sugli ETF personalizzati
+        custom_codes = [c for c in weights if lookup[c].get("custom")]
+        if custom_codes:
+            ok = [c for c in custom_codes if lookup[c].get("meta_ok")]
+            no = [c for c in custom_codes if not lookup[c].get("meta_ok")]
+            if ok:
+                st.info("ETF personalizzati riconosciuti da JustETF: " + ", ".join(ok))
+            if no:
+                st.warning("ETF personalizzati non riconosciuti (esposizione/costi "
+                           "indisponibili): " + ", ".join(no) +
+                           ". Usa un ISIN valido per i metadati o un ticker yfinance per i prezzi.")
+
         if have_prices:
             st.markdown("#### 🔮 Proiezione Monte Carlo")
-            order = list(weights.keys())
+            order = list(pmat.columns)
             am, ac = asset_annual_moments(returns, order)
             mc = montecarlo.monte_carlo_assets(
-                am, ac, weights, total, rb, (3, 5, 10, 15), n_paths=3000)
+                am, ac, weights_p, total, rb, (3, 5, 10, 15), n_paths=3000)
             t = mc["t"]
             fig_mc = go.Figure()
             fig_mc.add_trace(go.Scatter(
