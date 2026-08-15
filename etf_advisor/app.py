@@ -236,7 +236,13 @@ def page_etf():
     st.markdown("#### Filtri rigidi UCITS & Liquidità")
     f_col1, f_col2, f_col3 = st.columns(3)
     with f_col1:
-        only_acc = st.checkbox("Solo a accumulo", value=True)
+        acc_mode = st.radio(
+            "Tipo di accumulo",
+            ["Tutti", "Solo Accumulo", "Solo Distribuzione"],
+            index=0, horizontal=True,
+            help="Accumulo (Acc): i dividendi sono reinvestiti. "
+                 "Distribuzione (Dist): i dividendi sono pagati in conto.",
+        )
     with f_col2:
         min_size = st.slider("Dimensione fondo minima (M€)", 0, 500, 100, 50)
     with f_col3:
@@ -270,9 +276,16 @@ def page_etf():
             st.dataframe(pd.DataFrame(mrows), use_container_width=True, hide_index=True)
 
     # Applica filtri all'universo (tutti gli ETF sono già UCITS per costruzione)
+    def _acc_ok(e):
+        if acc_mode == "Tutti":
+            return True
+        if acc_mode == "Solo Accumulo":
+            return bool(e["accumulation"])
+        return not e["accumulation"]
+
     filtered = [
         e for e in ETF_UNIVERSE
-        if (e["accumulation"] or not only_acc)
+        if _acc_ok(e)
         and e["fund_size_m"] >= min_size
         and e["ter"] <= max_ter
         and e["category"] in cats

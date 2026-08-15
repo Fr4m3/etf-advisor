@@ -34,6 +34,8 @@ def max_sharpe_weights(
     geo_target: dict | None = None,
     geo_tol: float = 0.04,
     min_weight: float = 0.0,
+    class_targets: dict | None = None,
+    class_tol: float = 0.02,
 ) -> dict:
     """Calcola i pesi ottimali (Max Sharpe) su `returns`.
 
@@ -59,12 +61,16 @@ def max_sharpe_weights(
     mu = returns.mean().values * 252.0           # rendimenti attesi annui
     cov = returns.cov().values * 252.0           # matrice di covarianza annua
 
-    # Maschera equity (asset_class == 'Equity')
-    equity_idx = np.array(
-        [1 if ETF_BY_TICKER.get(c, {}).get("asset_class") == "Equity" else 0
-         for c in cols], dtype=float
-    )
-    # Vettore macro-geografico per ogni colonna (solo bucket richiesti)
+    # Maschere per classe di attivo
+    def _mask(cls):
+        return np.array(
+            [1.0 if ETF_BY_TICKER.get(c, {}).get("asset_class") == cls else 0.0
+             for c in cols], dtype=float
+        )
+    equity_idx = _mask("Equity")
+    bond_idx = _mask("Bond")
+    alt_idx = _mask("Alternatives")
+    # Vettore macro-geografico per ogni colonna
     macro_vecs = [etf_macro_vector(ETF_BY_TICKER.get(c, {})) for c in cols]
 
     def neg_sharpe(w):
@@ -77,42 +83,74 @@ def max_sharpe_weights(
     # Vincolo somma = 1
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
-    # Vincolo peso azionario intorno al target (due disuguaglianze)
-    if equity_target is not None and equity_idx.sum() > 0:
+    # ---- Vincoli per classe (Azionario / Obbligazionario / Materie Prime) ----
+    use_classes = False
+    eq_for_geo = equity_target
+    if class_targets:
+        avail = {
+            "Equity": equity_idx.sum() > 0,
+            "Bond": bond_idx.sum() > 0,
+            "Alternatives": alt_idx.sum() > 0,
+        }
+        eff = {cls: t for cls, t in class_targets.items()
+               if avail.get(cls, False) and t > 1e-6}
+        if eff:
+            dropped = sum(t for cls, t in class_targets.items()
+                          if not (avail.get(cls, False) and t > 1e-6))
+            tot = sum(eff.values())
+            if tot > 0 and dropped > 0:
+                for cls in eff:
+                    eff[cls] += dropped * (eff[cls] / tot)
+            for cls, tgt in eff.items():
+                m = {"Equity": equity_idx, "Bond": bond_idx,
+                     "Alternatives": alt_idx}[cls]
+                lo = max(0.0, tgt - class_tol)
+                hi = min(1.0, tgt + class_tol)
+                constraints.append(
+                    {"type": "ineq", "fun": lambda w, mm=m, hh=hi: hh - (mm @ w)})
+                constraints.append(
+                    {"type": "ineq", "fun": lambda w, mm=m, ll=lo: (mm @ w) - ll})
+            eq_for_geo = eff.get("Equity", equity_target)
+            use_classes = True
+
+    # ---- Vincolo peso azionario (solo se class_targets NON fornito) ----
+    if not use_classes and equity_target is not None and equity_idx.sum() > 0:
         lo = max(0.0, equity_target - equity_tol)
         hi = min(1.0, equity_target + equity_tol)
         constraints.append(
-            {"type": "ineq", "fun": lambda w: hi - (equity_idx @ w)}
-        )
+            {"type": "ineq", "fun": lambda w: hi - (equity_idx @ w)})
         constraints.append(
-            {"type": "ineq", "fun": lambda w: (equity_idx @ w) - lo}
-        )
+            {"type": "ineq", "fun": lambda w: (equity_idx @ w) - lo})
 
-    # Vincoli geografici sulla PARTE AZIONARIA:
-    #   sum_i (equity_idx_i * macro_vec_i[b]) * w_i  ≈  geo_target[b] * equity_target
-    if (geo_target and equity_target is not None and equity_idx.sum() > 0):
+    # ---- Vincoli geografici sulla PARTE AZIONARIA ----
+    if geo_target and eq_for_geo is not None and equity_idx.sum() > 0:
         for b, target_frac in geo_target.items():
             if b not in MACRO_BUCKETS:
                 continue
             coeff = np.array(
                 [equity_idx[i] * macro_vecs[i].get(b, 0.0) for i in range(n)]
             )
-            val = target_frac * equity_target
+            val = target_frac * eq_for_geo
             lo_g = max(0.0, val - geo_tol)
             hi_g = min(1.0, val + geo_tol)
             constraints.append(
-                {"type": "ineq", "fun": lambda w, c=coeff, h=hi_g: h - (c @ w)}
-            )
+                {"type": "ineq", "fun": lambda w, c=coeff, h=hi_g: h - (c @ w)})
             constraints.append(
-                {"type": "ineq", "fun": lambda w, c=coeff, l=lo_g: (c @ w) - l}
-            )
+                {"type": "ineq", "fun": lambda w, c=coeff, l=lo_g: (c @ w) - l})
 
     bounds = [(min_weight, 1.0) for _ in range(n)]
 
-    # Punto di partenza: equivalenti (o azionario/bond bilanciati)
-    if equity_target is not None and equity_idx.sum() > 0:
+    # Punto di partenza
+    if use_classes:
+        x0 = np.zeros(n)
+        for cls, tgt in eff.items():
+            m = {"Equity": equity_idx, "Bond": bond_idx,
+                 "Alternatives": alt_idx}[cls]
+            if m.sum() > 0:
+                x0 += m * (tgt / m.sum())
+    elif equity_target is not None and equity_idx.sum() > 0:
         x0 = np.where(equity_idx == 1, equity_target / equity_idx.sum(),
-                      (1 - equity_target) / (n - equity_idx.sum()))
+                      (1 - equity_target) / max(1, n - equity_idx.sum()))
     else:
         x0 = np.full(n, 1.0 / n)
 
