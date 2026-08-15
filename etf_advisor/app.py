@@ -87,14 +87,15 @@ with st.sidebar:
     page = st.radio(
         "Navigazione",
         ["1 · Questionario", "2 · ETF Consigliati", "3 · Report & Dashboard",
-         "4 · Il mio portafoglio"],
-        index=["questionario", "etf", "report", "myportfolio"].index(st.session_state.page),
+         "4 · Il mio portafoglio", "5 · Report Personale"],
+        index=["questionario", "etf", "report", "myportfolio", "personalreport"].index(st.session_state.page),
     )
     st.session_state.page = {
         "1 · Questionario": "questionario",
         "2 · ETF Consigliati": "etf",
         "3 · Report & Dashboard": "report",
         "4 · Il mio portafoglio": "myportfolio",
+        "5 · Report Personale": "personalreport",
     }[page]
 
     st.divider()
@@ -585,6 +586,10 @@ def page_report():
     scenario_df = pd.DataFrame(scen_rows)
     st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
+    # ---- Simulazione Worst-Case (stress test) ----
+    st.divider()
+    _render_worst_case(asset_mu, asset_cov, weights, capital, rb, mc_normal=mc)
+
     st.divider()
 
     # ---- Confronto tra profili ----
@@ -782,6 +787,72 @@ def _compare_chart(target_dict, achieved_dict, title):
                       legend=dict(orientation="h", y=-0.25),
                       margin=dict(l=40, r=20, t=40, b=60))
     return fig
+
+
+def _render_worst_case(asset_mu, asset_cov, weights, capital, rb,
+                      mc_normal=None, crash=0.40, ret_factor=0.5,
+                      vol_mult=1.4, n_paths=3000):
+    """Simula uno scenario worst-case (stress test) a partire dai momenti
+    annui del portafoglio.
+
+    Lo shock è composto da:
+      • un crollo iniziale del `crash`% sul capitale;
+      • rendimenti attesi ridotti del (1-ret_factor)% (ripresa lenta);
+      • volatilità elevata (+ (vol_mult-1)*100%).
+    Ritorna il dict Monte Carlo dello scenario avverso.
+    """
+    mu_s = np.asarray(asset_mu, dtype=float) * ret_factor
+    cov_s = np.asarray(asset_cov, dtype=float) * (vol_mult ** 2)
+    cap_s = capital * (1 - crash)
+    mc = montecarlo.monte_carlo_assets(
+        asset_mu=mu_s, asset_cov=cov_s, weights=weights, capital=cap_s,
+        rebalance=rb, horizons=(3, 5, 10, 15), max_years=15, n_paths=n_paths)
+
+    st.markdown("#### 🚨 Simulazione Worst-Case (stress test)")
+    st.caption(
+        f"Scenario avverso: shock iniziale del **-{crash*100:.0f}%** sul capitale, "
+        f"rendimenti attesi ridotti del **{(1-ret_factor)*100:.0f}%** e "
+        f"volatilità aumentata del **+{(vol_mult-1)*100:.0f}%**. Rappresenta "
+        f"una grave crisi di mercato con ripresa lenta.")
+
+    t = mc["t"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([t, t[::-1]]),
+        y=np.concatenate([mc["p90"], mc["p10"][::-1]]), fill="toself",
+        fillcolor="rgba(220,38,38,0.15)", line=dict(color="rgba(0,0,0,0)"),
+        hoverinfo="skip", name="Scenari 10°–90°"))
+    for p in mc["sample_paths"][::5]:
+        fig.add_trace(go.Scatter(
+            x=t, y=p, line=dict(color="gray", width=0.4), opacity=0.10,
+            showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=t, y=mc["p50"], name="Mediana worst-case (50°)",
+                             line=dict(color="#dc2626", width=3)))
+    if mc_normal is not None:
+        fig.add_trace(go.Scatter(
+            x=mc_normal["t"], y=mc_normal["p50"],
+            name="Mediana scenario normale",
+            line=dict(color="#2563eb", width=2, dash="dash")))
+    fig.add_hline(y=capital, line=dict(color="black", width=1, dash="dash"),
+                  annotation_text="Capitale iniziale")
+    fig.update_layout(
+        xaxis_title="Anni", yaxis_title="Valore portafoglio (€)", height=460,
+        legend=dict(orientation="h", y=-0.15),
+        margin=dict(l=40, r=20, t=20, b=40))
+    st.plotly_chart(fig, use_container_width=True)
+
+    rows = []
+    for h in (3, 5, 10, 15):
+        s = mc["terminal"][h]
+        rows.append({
+            "Orizzonte": f"{h} anni",
+            "Worst-Case (10°)": f"{s['p10']:,.0f} €",
+            "Worst-Case (50°)": f"{s['p50']:,.0f} €",
+            "Worst-Case (90°)": f"{s['p90']:,.0f} €",
+            "Perdita max vs capitale": f"{(s['p10']/capital-1)*100:.0f}%",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    return mc
 
 
 def page_my_portfolio():
@@ -1113,6 +1184,236 @@ def page_my_portfolio():
                        "Il piano di vendite/riacquisti è comunque valido.")
 
 
+def page_personal_report():
+    st.markdown('<div class="big-title">5 · Report Portafoglio Personale</div>',
+                unsafe_allow_html=True)
+    st.markdown("Report completo del **tuo** portafoglio (quello inserito nella "
+                "Pagina 4). Mostra allocazione, costi e proiezione Monte Carlo "
+                "**normale** e **worst-case**.")
+    st.caption("Condivide gli stessi ETF della Pagina 4, oppure aggiungili qui.")
+
+    if "portfolio_holdings" not in st.session_state:
+        st.session_state["portfolio_holdings"] = pd.DataFrame(
+            columns=["Codice", "Importo (€)"])
+
+    def _append_p5(code, amt):
+        df = st.session_state["portfolio_holdings"]
+        st.session_state["portfolio_holdings"] = pd.concat(
+            [df, pd.DataFrame([{"Codice": code, "Importo (€)": amt}])],
+            ignore_index=True)
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        q_sel = st.selectbox("ETF dell'universo",
+            [f"{e['ticker']} — {e['name']}" for e in ETF_UNIVERSE],
+            label_visibility="collapsed")
+    with c2:
+        q_amt = st.number_input("Importo (€)", 0, step=100, value=1000,
+                                label_visibility="collapsed")
+    with c3:
+        if st.button("➕ Aggiungi"):
+            _append_p5(q_sel.split(" — ")[0], q_amt)
+    c4, c5, c6 = st.columns([2, 1, 1])
+    with c4:
+        cust = st.text_input("ISIN o ticker personalizzato "
+            "(es. IE00BK5BQT80 / VWCE.DE)", label_visibility="collapsed")
+    with c5:
+        cust_amt = st.number_input("Importo pers. (€)", 0, step=100, value=1000,
+                                   key="p5_cust_amt", label_visibility="collapsed")
+    with c6:
+        if st.button("➕ Aggiungi personalizzato") and cust.strip():
+            _append_p5(cust.strip().upper(), cust_amt)
+
+    edited = st.data_editor(
+        st.session_state["portfolio_holdings"], num_rows="dynamic",
+        column_config={
+            "Codice": st.column_config.TextColumn("ISIN / Ticker"),
+            "Importo (€)": st.column_config.NumberColumn(
+                "Importo investito (€)", min_value=0, step=100)},
+        use_container_width=True, key="p5_editor")
+
+    if st.button("📊 Genera Report Personale", type="primary"):
+        rows = [r for _, r in edited.iterrows()
+                if str(r.get("Codice", "")).strip()
+                and (r.get("Importo (€)") or 0) > 0]
+        if not rows:
+            st.warning("Aggiungi almeno un ETF con importo > 0.")
+            return
+
+        amt = {}
+        for r in rows:
+            cc = str(r["Codice"]).strip().upper()
+            amt[cc] = amt.get(cc, 0.0) + float(r["Importo (€)"])
+        total = sum(amt.values())
+        lookup = {c: _resolve_holding(c)[0] for c in amt}
+
+        def _agg(w, key):
+            out = {}
+            for c, frac in w.items():
+                for k, v in lookup[c].get(key, {}).items():
+                    out[k] = out.get(k, 0.0) + frac * v
+            return out
+
+        cur_weights = {c: v / total for c, v in amt.items()}
+        geo = _agg(cur_weights, "region")
+        sec = _agg(cur_weights, "sectors")
+        cur_class = {"Azionario": 0.0, "Obbligazionario": 0.0, "Materie Prime": 0.0}
+        for c, w in cur_weights.items():
+            a = lookup[c]["asset_class"]
+            lbl = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                   "Alternatives": "Materie Prime"}.get(a, a)
+            cur_class[lbl] = cur_class.get(lbl, 0.0) + w
+        wter = weighted_ter(cur_weights)
+        cost_eur = weighted_cost_eur(cur_weights, total)
+
+        # ----- Prezzi -----
+        price_cols = {}
+        known = [c for c in cur_weights if not lookup[c].get("custom")]
+        if known:
+            pr = _cached_prices(tuple(known), "5y", True)
+            for c in known:
+                yf = lookup[c]["yf_ticker"]
+                if yf in pr.columns and pr[yf].notna().sum() > 20:
+                    price_cols[c] = pr[yf]
+        for c in cur_weights:
+            if c in price_cols:
+                continue
+            p = lookup[c].get("_prices")
+            if p is not None and not p.empty and p.columns[0] in p and \
+               p[p.columns[0]].notna().sum() > 20:
+                price_cols[c] = p[p.columns[0]]
+        have_prices = bool(price_cols) and \
+            pd.DataFrame(price_cols).dropna().shape[0] > 20
+        pmat = pd.DataFrame(price_cols).dropna() if price_cols else pd.DataFrame()
+
+        st.success(f"Capitale totale: **{total:,.0f} €**")
+
+        # ----- Allocazioni -----
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.markdown("#### 🌍 Esposizione Geografica")
+            if geo:
+                fg = px.pie(names=list(geo.keys()), values=list(geo.values()),
+                            hole=0.5,
+                            color_discrete_sequence=px.colors.qualitative.Set2)
+                fg.update_traces(textinfo="percent+label")
+                st.plotly_chart(fg, use_container_width=True)
+        with g2:
+            st.markdown("#### 🏭 Esposizione Settoriale")
+            if sec:
+                fs = px.pie(names=list(sec.keys()), values=list(sec.values()),
+                            hole=0.5,
+                            color_discrete_sequence=px.colors.qualitative.Pastel)
+                fs.update_traces(textinfo="percent+label")
+                st.plotly_chart(fs, use_container_width=True)
+        with g3:
+            st.markdown("#### ⚖️ Allocazione per Classe")
+            if cur_class:
+                fc = px.pie(names=list(cur_class.keys()),
+                            values=list(cur_class.values()), hole=0.5,
+                            color_discrete_sequence=px.colors.qualitative.Set1)
+                fc.update_traces(textinfo="percent+label")
+                st.plotly_chart(fc, use_container_width=True)
+
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("TER medio di portafoglio", f"{wter:.3f}%")
+        with m2:
+            st.metric("Costo stimato (€/anno)", f"{cost_eur:,.2f} €")
+
+        st.divider()
+
+        if have_prices:
+            rb = st.session_state.get("rebalance", "none")
+            order = list(pmat.columns)
+            returns = daily_returns(pmat).dropna()
+            asset_mu, asset_cov = asset_annual_moments(returns, order)
+            w_mc = {c: cur_weights[c] for c in pmat.columns}
+            ssum = sum(w_mc.values()) or 1
+            w_mc = {k: v / ssum for k, v in w_mc.items()}
+
+            pseries = portfolio_price_series(pmat, w_mc, rb)
+            psr = pseries.pct_change().dropna()
+            ann_ret = float(psr.mean() * 252)
+            ann_vol = float(psr.std() * np.sqrt(252))
+            sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
+            mdd = max_drawdown(pseries)
+
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Rendimento atteso (annuo)", f"{ann_ret*100:.1f}%")
+            r2.metric("Volatilità annualizzata", f"{ann_vol*100:.1f}%")
+            with r3:
+                st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+            with r4:
+                st.metric("Max Drawdown storico", f"{mdd*100:.1f}%")
+
+            mc = montecarlo.monte_carlo_assets(
+                asset_mu=asset_mu, asset_cov=asset_cov, weights=w_mc,
+                capital=total, rebalance=rb, horizons=(3, 5, 10, 15),
+                max_years=15, n_paths=3000)
+            st.markdown("#### 🔮 Proiezione Monte Carlo (scenario normale)")
+            st.caption("Simulazione di 3.000 percorsi (Moto Browniano "
+                       "Geometrico) basati su rendimento atteso e volatilità "
+                       "storici, con la politica di ribilanciamento scelta.")
+            t = mc["t"]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([t, t[::-1]]),
+                y=np.concatenate([mc["p90"], mc["p10"][::-1]]), fill="toself",
+                fillcolor="rgba(34,197,94,0.15)",
+                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+                name="Scenari 10°–90°"))
+            for p in mc["sample_paths"][::4]:
+                fig.add_trace(go.Scatter(
+                    x=t, y=p, line=dict(color="gray", width=0.5),
+                    opacity=0.12, showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=t, y=mc["p50"], name="Atteso (50°)",
+                                     line=dict(color="#2563eb", width=3)))
+            fig.add_trace(go.Scatter(x=t, y=mc["p90"],
+                                     name="Ottimistico (90°)",
+                                     line=dict(color="#16a34a", width=2,
+                                               dash="dot")))
+            fig.add_trace(go.Scatter(x=t, y=mc["p10"],
+                                     name="Pessimistico (10°)",
+                                     line=dict(color="#dc2626", width=2,
+                                               dash="dot")))
+            fig.add_hline(y=total, line=dict(color="black", width=1,
+                                             dash="dash"),
+                          annotation_text="Capitale iniziale")
+            fig.update_layout(
+                xaxis_title="Anni", yaxis_title="Valore portafoglio (€)",
+                height=460, legend=dict(orientation="h", y=-0.15),
+                margin=dict(l=40, r=20, t=20, b=40))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tabella scenari normali
+            norm_rows = []
+            for h in (3, 5, 10, 15):
+                s = mc["terminal"][h]
+                norm_rows.append({
+                    "Orizzonte": f"{h} anni",
+                    "Pessimistico (10°)": f"{s['p10']:,.0f} €",
+                    "Atteso (50°)": f"{s['p50']:,.0f} €",
+                    "Ottimistico (90°)": f"{s['p90']:,.0f} €",
+                    "Rend. medio atteso": f"{(s['p50']/total)**(1/h)-1:.1%} /anno",
+                })
+            st.dataframe(pd.DataFrame(norm_rows), use_container_width=True,
+                         hide_index=True)
+
+            st.divider()
+            _render_worst_case(asset_mu, asset_cov, w_mc, total, rb,
+                               mc_normal=mc)
+        else:
+            st.caption("Metriche storiche non disponibili (prezzi/serie "
+                       "insufficienti per alcuni ETF).")
+
+        st.markdown('<div class="disclaimer">⚠️ Dati e simulazioni a scopo '
+                    'educativo/dimostrativo. Non costituiscono consulenza '
+                    'finanziaria. Verifica SEMPRE TER, dimensione e '
+                    'documentazione ufficiale (KID/KIID) prima di investire.'
+                    '</div>', unsafe_allow_html=True)
+
+
 # ===========================================================================
 # ROUTER
 # ===========================================================================
@@ -1124,3 +1425,5 @@ elif st.session_state.page == "report":
     page_report()
 elif st.session_state.page == "myportfolio":
     page_my_portfolio()
+elif st.session_state.page == "personalreport":
+    page_personal_report()
