@@ -776,6 +776,37 @@ def _solve_target_weights(etfs, class_target, geo_target, sector_target, geo_w=1
     return {etfs[i]["ticker"]: float(w[i]) for i in range(n)}
 
 
+def _generate_personal_portfolio(etfs, class_target, geo_target, sector_target, k_per_class=5):
+    """Genera un portafoglio *ex-novo* sull'universo `etfs` che rispetta i target
+    di classe (somma per classe = class_target) e seleziona, per ogni classe, i
+    top-K ETF più aderenti a geografia/settore, pesandoli con un proxy Sharpe
+    (exp_return / vol). Euristica robusta e diversificata (evita pesi uniformi
+    su tutto l'universo)."""
+    chosen = {}
+    for cls in ("Equity", "Bond", "Alternatives"):
+        tgt = class_target.get(cls, 0.0)
+        if tgt <= 1e-6:
+            continue
+        pool = [e for e in etfs if e["asset_class"] == cls]
+        if not pool:
+            continue
+        def score(e):
+            g = sum(e.get("region", {}).get(k, 0.0) * geo_target.get(k, 0.0)
+                     for k in geo_target)
+            s = sum(e.get("sectors", {}).get(k, 0.0) * sector_target.get(k, 0.0)
+                     for k in sector_target)
+            return g + s + 0.05 * float(e.get("exp_return", 0.03))
+        pool.sort(key=score, reverse=True)
+        sel = pool[:k_per_class]
+        sharpe = np.array([
+            max(float(e.get("exp_return", 0.03)), 1e-3) /
+            max(float(e.get("vol", 0.1)), 0.01) for e in sel])
+        sharpe = sharpe / sharpe.sum()
+        for e, w in zip(sel, sharpe):
+            chosen[e["ticker"]] = w * tgt
+    return chosen
+
+
 def _compare_chart(target_dict, achieved_dict, title):
     keys = list(dict.fromkeys(list(target_dict.keys()) + list(achieved_dict.keys())))
     tg = [target_dict.get(k, 0.0) * 100 for k in keys]
@@ -1182,6 +1213,149 @@ def page_my_portfolio():
         else:
             st.caption("Metriche storiche non disponibili (prezzi/serie insufficienti). "
                        "Il piano di vendite/riacquisti è comunque valido.")
+
+    st.divider()
+    st.markdown("### 🎯 Genera un portafoglio personalizzato (da zero)")
+    st.caption("Crea un portafoglio ottimizzato sull'intero universo UCITS che "
+               "rispetta i tuoi obiettivi (classe / geografia / settore impostati "
+               "sopra), presentato in stile Pagina 4 (Obiettivo vs Raggiunto). "
+               "Non parte dai tuoi possessi attuali: è una costruzione ex-novo.")
+    gen_acc = st.radio("Tipo di accumulo (generatore)",
+                       ["Tutti", "Solo Accumulo", "Solo Distribuzione"],
+                       horizontal=True, key="gen_acc")
+
+    if st.button("🚀 Genera portafoglio personalizzato", type="primary"):
+        if gen_acc == "Solo Accumulo":
+            filt = [e for e in ETF_UNIVERSE if e["accumulation"]]
+        elif gen_acc == "Solo Distribuzione":
+            filt = [e for e in ETF_UNIVERSE if not e["accumulation"]]
+        else:
+            filt = list(ETF_UNIVERSE)
+        if not filt:
+            st.warning("Nessun ETF corrisponde ai filtri selezionati.")
+        else:
+            tw = _generate_personal_portfolio(filt, class_target, geo_target, sec_target)
+            tw = {t: w for t, w in tw.items() if w > 1e-4}
+            if not tw:
+                st.warning("Nessun peso positivo generato con questi obiettivi.")
+            else:
+                gen_total = float(capital)
+                # ---- Obiettivo vs Raggiunto ----
+                ach_class = {"Azionario": 0.0, "Obbligazionario": 0.0, "Materie Prime": 0.0}
+                for c, w in tw.items():
+                    a = ETF_BY_TICKER[c]["asset_class"]
+                    lbl = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                           "Alternatives": "Materie Prime"}.get(a, a)
+                    ach_class[lbl] = ach_class.get(lbl, 0.0) + w
+                ach_geo = aggregate_exposure(tw, "region")
+                ach_sec = aggregate_exposure(tw, "sectors")
+                class_lbl = {"Azionario": class_target["Equity"],
+                             "Obbligazionario": class_target["Bond"],
+                             "Materie Prime": class_target["Alternatives"]}
+                st.success(f"Portafoglio generato: **{len(tw)} ETF** · "
+                           f"Capitale di riferimento: **{gen_total:,.0f} €**")
+                gc1, gc2, gc3 = st.columns(3)
+                with gc1:
+                    st.markdown("**Classe**")
+                    st.plotly_chart(_compare_chart(class_lbl, ach_class, ""),
+                                    use_container_width=True)
+                with gc2:
+                    st.markdown("**Geografia**")
+                    st.plotly_chart(_compare_chart(geo_target, ach_geo, ""),
+                                    use_container_width=True)
+                with gc3:
+                    st.markdown("**Settore**")
+                    st.plotly_chart(_compare_chart(sec_target, ach_sec, ""),
+                                    use_container_width=True)
+
+                # ---- Composizione ----
+                comp = []
+                for c, w in sorted(tw.items(), key=lambda x: -x[1]):
+                    e = ETF_BY_TICKER[c]
+                    comp.append({"Codice": c, "Nome": e["name"],
+                                 "Peso (%)": round(w * 100, 2),
+                                 "Importo (€)": round(w * gen_total, 2),
+                                 "TER (%)": e["ter"],
+                                 "Costo €/anno": round(w * gen_total * e["ter"] / 100.0, 2)})
+                st.markdown("#### 📋 Composizione del portafoglio generato")
+                st.dataframe(pd.DataFrame(comp), use_container_width=True, hide_index=True)
+                gen_ter = sum(w * ETF_BY_TICKER[c]["ter"] for c, w in tw.items())
+                gen_cost = sum(w * gen_total * ETF_BY_TICKER[c]["ter"] / 100.0
+                               for c, w in tw.items())
+                st.caption(f"TER medio: **{gen_ter:.3f}%** · "
+                           f"Costo stimato: **{gen_cost:,.2f} €/anno**")
+
+                # ---- Metriche & Monte Carlo ----
+                known = list(tw.keys())
+                pr = _cached_prices(tuple(known), "5y", True)
+                price_cols = {}
+                for c in known:
+                    yf = ETF_BY_TICKER[c]["yf_ticker"]
+                    if yf in pr.columns and pr[yf].notna().sum() > 20:
+                        price_cols[c] = pr[yf]
+                have_prices = bool(price_cols) and \
+                    pd.DataFrame(price_cols).dropna().shape[0] > 20
+                pmat = pd.DataFrame(price_cols).dropna() if price_cols else pd.DataFrame()
+                if have_prices:
+                    rb = rebal_mode
+                    twp = {c: tw.get(c, 0.0) for c in pmat.columns}
+                    ssum = sum(twp.values()) or 1.0
+                    twp = {k: v / ssum for k, v in twp.items()}
+                    pseries = portfolio_price_series(pmat, twp, rb)
+                    psr = pseries.pct_change().dropna()
+                    ann_ret = float(psr.mean() * 252)
+                    ann_vol = float(psr.std() * np.sqrt(252))
+                    sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
+                    mdd = max_drawdown(pseries)
+                    returns = daily_returns(pmat).dropna()
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Rend. annuo atteso", f"{ann_ret*100:.1f}%")
+                    m2.metric("Volatilità", f"{ann_vol*100:.1f}%")
+                    with m3:
+                        st.metric("Sharpe", f"{sharpe:.2f}")
+                    with m4:
+                        st.metric("Max Drawdown", f"{mdd*100:.1f}%")
+                    am_, ac_ = asset_annual_moments(returns, list(pmat.columns))
+                    mc = montecarlo.monte_carlo_assets(
+                        am_, ac_, twp, gen_total, rb, (3, 5, 10, 15), n_paths=3000)
+                    st.markdown("**🔮 Proiezione Monte Carlo (scenario normale)**")
+                    t = mc["t"]
+                    fg = go.Figure()
+                    fg.add_trace(go.Scatter(
+                        x=np.concatenate([t, t[::-1]]),
+                        y=np.concatenate([mc["p90"], mc["p10"][::-1]]), fill="toself",
+                        fillcolor="rgba(34,197,94,0.15)",
+                        line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+                        name="Scenari 10°–90°"))
+                    for p in mc["sample_paths"][::4]:
+                        fg.add_trace(go.Scatter(
+                            x=t, y=p, line=dict(color="gray", width=0.5),
+                            opacity=0.12, showlegend=False, hoverinfo="skip"))
+                    fg.add_trace(go.Scatter(x=t, y=mc["p50"], name="Atteso (50°)",
+                                            line=dict(color="#2563eb", width=3)))
+                    fg.add_trace(go.Scatter(x=t, y=mc["p90"], name="Ottimistico (90°)",
+                                            line=dict(color="#16a34a", width=2, dash="dot")))
+                    fg.add_trace(go.Scatter(x=t, y=mc["p10"], name="Pessimistico (10°)",
+                                            line=dict(color="#dc2626", width=2, dash="dot")))
+                    fg.add_hline(y=gen_total, line=dict(color="black", width=1, dash="dash"),
+                                 annotation_text="Capitale iniziale")
+                    fg.update_layout(
+                        xaxis_title="Anni", yaxis_title="Valore (€)", height=460,
+                        legend=dict(orientation="h", y=-0.15),
+                        margin=dict(l=40, r=20, t=20, b=40))
+                    st.plotly_chart(fg, use_container_width=True)
+                    scn = []
+                    for h in (3, 5, 10, 15):
+                        s = mc["terminal"][h]
+                        scn.append({"Orizzonte": f"{h} anni",
+                                    "Pessimistico (10°)": f"{s['p10']:,.0f} €",
+                                    "Atteso (50°)": f"{s['p50']:,.0f} €",
+                                    "Ottimistico (90°)": f"{s['p90']:,.0f} €"})
+                    st.dataframe(pd.DataFrame(scn), use_container_width=True, hide_index=True)
+                    st.divider()
+                    _render_worst_case(am_, ac_, twp, gen_total, rb, mc_normal=mc)
+                else:
+                    st.caption("Metriche storiche non disponibili (prezzi/serie insufficienti).")
 
 
 def page_personal_report():
