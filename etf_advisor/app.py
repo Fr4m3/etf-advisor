@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 import streamlit as st
 
 import plotly.express as px
@@ -713,19 +714,87 @@ def _resolve_holding(code):
     return etf, prices
 
 
+# ---- Chiavi obiettivo di ribilanciamento (Pagina 4) ----
+GEO_KEYS = ["USA", "Europa", "Giappone", "Emergenti", "Pacifico Sviluppato", "Altri Sviluppati"]
+SECTOR_KEYS = ["Tecnologia", "Finanziari", "Salute", "Industria", "Consumi Discrezionali",
+               "Staples (Beni di Base)", "Energia", "Utilities", "Materiali",
+               "Comunicazioni", "Real Estate"]
+DEFAULT_GEO = {"USA": 55, "Europa": 20, "Giappone": 5, "Emergenti": 15,
+               "Pacifico Sviluppato": 5, "Altri Sviluppati": 0}
+DEFAULT_SEC = {"Tecnologia": 22, "Finanziari": 16, "Salute": 14, "Industria": 11,
+               "Consumi Discrezionali": 11, "Staples (Beni di Base)": 8,
+               "Energia": 5, "Utilities": 4, "Materiali": 4,
+               "Comunicazioni": 3, "Real Estate": 2}
+
+
+def _solve_target_weights(etfs, class_target, geo_target, sector_target, geo_w=1.0, sec_w=1.0):
+    """Pesi sugli ETF attuali che rispettano l'obiettivo di **classe** come
+    vincolo rigido (somma Az=target, Obbl=target, Mat=target) e approssimano
+    al meglio geografia/settore (soft) all'interno di ciascuna classe.
+    Long-only, somma=1. Se mancano ETF di una classe, quel vincolo è saltato
+    (il target di classe non è raggiungibile)."""
+    n = len(etfs)
+    if n == 0:
+        return {}
+    G = np.vstack([np.array([e.get("region", {}).get(k, 0.0) for k in GEO_KEYS]) for e in etfs])
+    Gt = np.array([geo_target.get(k, 0.0) for k in GEO_KEYS])
+    S = np.vstack([np.array([e.get("sectors", {}).get(k, 0.0) for k in SECTOR_KEYS]) for e in etfs])
+    St = np.array([sector_target.get(k, 0.0) for k in SECTOR_KEYS])
+    ng, ns = len(GEO_KEYS), len(SECTOR_KEYS)
+
+    def obj(w):
+        g = G.T @ w
+        s = S.T @ w
+        return geo_w * np.sum((g - Gt) ** 2) / max(ng, 1) + \
+               sec_w * np.sum((s - St) ** 2) / max(ns, 1)
+
+    cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+    for cls in ("Equity", "Bond", "Alternatives"):
+        idx = [i for i, e in enumerate(etfs) if e["asset_class"] == cls]
+        if not idx:
+            continue
+        tgt = class_target.get(cls, 0.0)
+        cons.append({"type": "eq", "fun": (lambda w, k=idx, t=tgt: sum(w[i] for i in k) - t)})
+
+    bounds = [(0.0, 1.0)] * n
+    x0 = np.full(n, 1.0 / n)
+    try:
+        res = minimize(obj, x0, method="SLSQP", bounds=bounds, constraints=cons,
+                       options={"maxiter": 1000, "ftol": 1e-9})
+        w = res.x if res.success else x0
+    except Exception:
+        w = x0
+    w = np.clip(w, 0, None)
+    ssum = w.sum()
+    if ssum > 0:
+        w = w / ssum
+    return {etfs[i]["ticker"]: float(w[i]) for i in range(n)}
+
+
+def _compare_chart(target_dict, achieved_dict, title):
+    keys = list(dict.fromkeys(list(target_dict.keys()) + list(achieved_dict.keys())))
+    tg = [target_dict.get(k, 0.0) * 100 for k in keys]
+    ac = [achieved_dict.get(k, 0.0) * 100 for k in keys]
+    fig = go.Figure()
+    fig.add_bar(x=keys, y=tg, name="Obiettivo")
+    fig.add_bar(x=keys, y=ac, name="Raggiunto")
+    fig.update_layout(barmode="group", title=title, height=360,
+                      legend=dict(orientation="h", y=-0.25),
+                      margin=dict(l=40, r=20, t=40, b=60))
+    return fig
+
+
 def page_my_portfolio():
-    st.markdown('<div class="big-title">4 · Il mio portafoglio</div>',
+    st.markdown('<div class="big-title">4 · Il mio portafoglio & Ribilanciamento</div>',
                 unsafe_allow_html=True)
-    st.markdown("Inserisci gli ETF che possiedi e l'importo investito: il sistema "
-                "calcola esposizione **geografica** e **settoriale**, i **costi (TER)** "
-                "e — se i prezzi sono disponibili — **Sharpe, volatilità e drawdown** "
-                "del *tuo* portafoglio. Puoi usare gli ETF dell'universo oppure "
-                "incollare un **ISIN** o un **ticker Yahoo** (es. `IE00BK5BQT80` o "
-                "`VWCE.DE`): i metadati vengono recuperati automaticamente da "
-                "JustETF / Yahoo Finance.")
-    st.caption("Suggerimento: incolla un ISIN per ottenere esposizione geografica/"
-               "settoriale e TER da JustETF; incolla un ticker yfinance (es. VWCE.DE) "
-               "per ottenere anche le serie storiche dei prezzi.")
+    st.markdown("Strumento **autonomo**: non usa i parametri delle pagine precedenti. "
+                "Inserisci cosa possiedi oggi, definisci il tuo **obiettivo** di "
+                "allocazione per **classe** (Azionario / Obbligazionario / Materie Prime), "
+                "**geografia** e **settore**, e ottieni il **piano operativo**: quanto "
+                "**vendere** di ciascun ETF e con i proventi **riacquistare** sugli altri "
+                "per avvicinarti il più possibile all'obiettivo.")
+    st.caption("Suggerimento: incolla un ISIN (es. IE00BK5BQT80) per metadati da "
+               "JustETF, o un ticker yfinance (es. VWCE.DE) per le serie storiche.")
 
     if "portfolio_holdings" not in st.session_state:
         st.session_state["portfolio_holdings"] = pd.DataFrame(columns=["Codice", "Importo (€)"])
@@ -736,7 +805,7 @@ def page_my_portfolio():
             [df, pd.DataFrame([{"Codice": code, "Importo (€)": amt}])],
             ignore_index=True)
 
-    st.markdown("**Aggiungi rapido dall'universo:**")
+    st.markdown("### 💼 I tuoi ETF attuali")
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         q_sel = st.selectbox("ETF dell'universo",
@@ -749,10 +818,9 @@ def page_my_portfolio():
         if st.button("➕ Aggiungi"):
             _append(q_sel.split(" — ")[0], q_amt)
 
-    st.markdown("**Oppure incolla un ISIN / ticker personalizzato:**")
     c4, c5, c6 = st.columns([2, 1, 1])
     with c4:
-        cust = st.text_input("ISIN o ticker (es. IE00BK5BQT80 / VWCE.DE)",
+        cust = st.text_input("ISIN o ticker personalizzato (es. IE00BK5BQT80 / VWCE.DE)",
                              label_visibility="collapsed")
     with c5:
         cust_amt = st.number_input("Importo pers. (€)", 0, step=100, value=1000,
@@ -771,18 +839,57 @@ def page_my_portfolio():
         use_container_width=True, key="portfolio_editor",
     )
 
-    # Ribilanciamento del portafoglio personale
+    st.divider()
+    st.markdown("### 🎯 Obiettivo di ribilanciamento")
+    st.markdown("Definisci l'allocazione **target** (tutto calcolato qui, in modo "
+                "indipendente dalla Pagina 2).")
+
+    # --- Classe ---
+    st.markdown("**Per classe (Azionario / Obbligazionario / Materie Prime)**")
+    eq_alloc = st.slider("📈 Azionario (%)", 0, 100, 60, 5, key="r_eq")
+    comm_alloc = st.slider("🪙 Materie Prime (%)", 0, 100, 5, 1, key="r_comm")
+    bond_alloc = 100 - eq_alloc - comm_alloc
+    if bond_alloc < 0:
+        st.warning(f"La somma di Azionario ({eq_alloc}%) e Materie Prime ({comm_alloc}%) "
+                   f"supera 100%. Materie Prime ridotta a {100 - eq_alloc}% nel calcolo.")
+        comm_alloc = max(0, 100 - eq_alloc)
+        bond_alloc = 100 - eq_alloc - comm_alloc
+    st.write(f"🏦 Obbligazionario (derivato): **{bond_alloc}%**")
+    class_target = {"Equity": eq_alloc / 100.0, "Bond": bond_alloc / 100.0,
+                    "Alternatives": comm_alloc / 100.0}
+
+    # --- Geografia ---
+    st.markdown("**Geografica (normalizzata a 100%)**")
+    gcols = st.columns(3)
+    geo_raw = {}
+    for i, k in enumerate(GEO_KEYS):
+        with gcols[i % 3]:
+            geo_raw[k] = st.slider(k, 0, 100, DEFAULT_GEO[k], 1, key="r_geo_" + k)
+    gs = sum(geo_raw.values()) or 1
+    geo_target = {k: v / gs for k, v in geo_raw.items()}
+
+    # --- Settoriale ---
+    st.markdown("**Settoriale (normalizzata a 100%)**")
+    scols = st.columns(3)
+    sec_raw = {}
+    for i, k in enumerate(SECTOR_KEYS):
+        with scols[i % 3]:
+            sec_raw[k] = st.slider(k, 0, 100, DEFAULT_SEC[k], 1, key="r_sec_" + k)
+    ss = sum(sec_raw.values()) or 1
+    sec_target = {k: v / ss for k, v in sec_raw.items()}
+
+    # --- Frequenza (solo per simulazione del portafoglio risultante) ---
     _rb_map = {"Nessuno": "none", "Annuale": "annual",
                "Trimestrale": "quarterly", "Mensile": "monthly"}
     rebal_label = st.selectbox(
-        "🔄 Politica di ribilanciamento",
+        "🔄 Frequenza di ribilanciamento (solo per la simulazione del portafoglio risultante)",
         list(_rb_map.keys()), index=0,
-        help="Ribilanciamento periodico del tuo portafoglio: riconduce i pesi "
-             "al target a intervalli fissi.",
+        help="Usata per proiettare il portafoglio *risultante*; non influisce sul "
+             "piano di vendite/riacquisti.",
     )
     rebal_mode = _rb_map[rebal_label]
 
-    if st.button("📊 Analizza il mio portafoglio", type="primary"):
+    if st.button("📊 Calcola piano di ribilanciamento", type="primary"):
         rows = [r for _, r in edited.iterrows()
                 if str(r.get("Codice", "")).strip() and (r.get("Importo (€)") or 0) > 0]
         if not rows:
@@ -793,10 +900,9 @@ def page_my_portfolio():
             cc = str(r["Codice"]).strip().upper()
             amt[cc] = amt.get(cc, 0.0) + float(r["Importo (€)"])
         total = sum(amt.values())
-        weights = {c: v / total for c, v in amt.items()}
 
-        # Risolvi metadati per ogni codice
-        lookup = {c: _resolve_holding(c)[0] for c in weights}
+        lookup = {c: _resolve_holding(c)[0] for c in amt}
+        etfs = [lookup[c] for c in amt]
 
         def _agg(w, key):
             out = {}
@@ -804,136 +910,207 @@ def page_my_portfolio():
                 for k, v in lookup[c].get(key, {}).items():
                     out[k] = out.get(k, 0.0) + frac * v
             return out
-        geo = _agg(weights, "region")
-        sec = _agg(weights, "sectors")
-        wter = sum(weights[c] * lookup[c]["ter"] for c in weights)
-        cost = sum(weights[c] * total * lookup[c]["ter"] / 100.0 for c in weights)
 
-        # Prezzi: universo via _cached_prices, custom da fetch diretto
+        # ----- Portafoglio attuale -----
+        cur_weights = {c: v / total for c, v in amt.items()}
+        cur_geo = _agg(cur_weights, "region")
+        cur_sec = _agg(cur_weights, "sectors")
+        cur_class = {"Azionario": 0.0, "Obbligazionario": 0.0, "Materie Prime": 0.0}
+        for c, w in cur_weights.items():
+            a = lookup[c]["asset_class"]
+            lbl = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                   "Alternatives": "Materie Prime"}.get(a, a)
+            cur_class[lbl] = cur_class.get(lbl, 0.0) + w
+        cur_ter = sum(cur_weights[c] * lookup[c]["ter"] for c in cur_weights)
+        cur_cost = sum(cur_weights[c] * total * lookup[c]["ter"] / 100.0 for c in cur_weights)
+
+        # Prezzi per metriche storiche
         price_cols = {}
-        known = [c for c in weights if not lookup[c].get("custom")]
+        known = [c for c in cur_weights if not lookup[c].get("custom")]
         if known:
             pr = _cached_prices(tuple(known), "5y", True)
             for c in known:
                 yf = lookup[c]["yf_ticker"]
                 if yf in pr.columns and pr[yf].notna().sum() > 20:
                     price_cols[c] = pr[yf]
-        for c in weights:
+        for c in cur_weights:
             if c in price_cols:
                 continue
             p = lookup[c].get("_prices")
             if p is not None and not p.empty and p.columns[0] in p and \
                p[p.columns[0]].notna().sum() > 20:
                 price_cols[c] = p[p.columns[0]]
-
-        have_prices = bool(price_cols) and \
-            pd.DataFrame(price_cols).dropna().shape[0] > 20
+        have_prices = bool(price_cols) and pd.DataFrame(price_cols).dropna().shape[0] > 20
         pmat = pd.DataFrame(price_cols).dropna() if price_cols else pd.DataFrame()
+
+        # ----- Target weights & piano di vendita/riacquisto -----
+        tw = _solve_target_weights(etfs, class_target, geo_target, sec_target)
+        target_val = {c: total * tw.get(c, 0.0) for c in amt}
+
+        plan_rows = []
+        total_buy = total_sell = 0.0
+        for c in amt:
+            cur = amt[c]
+            tgt = target_val[c]
+            delta = tgt - cur
+            if delta > 1e-9:
+                total_buy += delta
+                action = "ACQUISTA"
+            elif delta < -1e-9:
+                total_sell += -delta
+                action = "VENDI"
+            else:
+                action = "—"
+            plan_rows.append({
+                "Codice": c, "Nome": lookup[c]["name"],
+                "Attuale (€)": round(cur, 2), "Peso att. (%)": round(cur / total * 100, 2),
+                "Target (€)": round(tgt, 2), "Peso tgt (%)": round(tgt / total * 100, 2),
+                "Δ (€)": round(delta, 2), "Azione": action,
+            })
+        net_cash = total_buy - total_sell
+
+        # Allocazione raggiunta dal portafoglio target
+        tgt_weights = {c: tw.get(c, 0.0) for c in amt}
+        ach_geo = _agg(tgt_weights, "region")
+        ach_sec = _agg(tgt_weights, "sectors")
+        ach_class = {"Azionario": 0.0, "Obbligazionario": 0.0, "Materie Prime": 0.0}
+        for c, w in tgt_weights.items():
+            a = lookup[c]["asset_class"]
+            lbl = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                   "Alternatives": "Materie Prime"}.get(a, a)
+            ach_class[lbl] = ach_class.get(lbl, 0.0) + w
+        class_target_lbl = {"Azionario": class_target["Equity"],
+                            "Obbligazionario": class_target["Bond"],
+                            "Materie Prime": class_target["Alternatives"]}
+
+        # Avviso se una classe target non è rappresentata tra i possessi
+        _cls_gap = []
+        for lbl, key in (("Azionario", "Equity"), ("Obbligazionario", "Bond"),
+                         ("Materie Prime", "Alternatives")):
+            gap = class_target[key] - ach_class.get(lbl, 0.0)
+            if gap > 0.05:
+                _cls_gap.append(lbl)
+        if _cls_gap:
+            st.warning("Le seguenti classi target non sono pienamente raggiungibili "
+                       "perché mancano ETF di quella classe tra i tuoi possessi: **"
+                       + ", ".join(_cls_gap) + "**. Aggiungi un ETF di quella classe "
+                       "(es. un obligazionario o un ETC materie prime) per avvicinarti.")
+
+        # ====== RENDER ======
+        st.success(f"Capitale totale: **{total:,.0f} €** · "
+                   f"Vendite: **{total_sell:,.0f} €** · "
+                   f"Riacquisti: **{total_buy:,.0f} €** · "
+                   f"Liquidità netta: **{net_cash:,.2f} €** (≈ 0 → piano a somma zero)")
+        if abs(net_cash) > 1.0:
+            st.caption("Piccola differenza di arrotondamento nelle vendite/riacquisti.")
+
+        st.markdown("#### 🔁 Piano di vendite / riacquisti")
+        st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🎯 Obiettivo vs Raggiunto (portafoglio target)")
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            st.markdown("**Classe**")
+            st.plotly_chart(_compare_chart(class_target_lbl, ach_class, ""), use_container_width=True)
+        with cc2:
+            st.markdown("**Geografia**")
+            st.plotly_chart(_compare_chart(geo_target, ach_geo, ""), use_container_width=True)
+        with cc3:
+            st.markdown("**Settore**")
+            st.plotly_chart(_compare_chart(sec_target, ach_sec, ""), use_container_width=True)
+
+        with st.expander("📊 Dettaglio portafoglio attuale"):
+            st.markdown(f"**TER medio:** {cur_ter:.3f}% · **Costo stimato:** {cur_cost:,.2f} €/anno")
+            dg1, dg2 = st.columns(2)
+            with dg1:
+                st.markdown("**Geografia attuale**")
+                if cur_geo:
+                    fg = px.pie(names=list(cur_geo.keys()), values=list(cur_geo.values()),
+                                hole=0.5, color_discrete_sequence=px.colors.qualitative.Set2)
+                    fg.update_traces(textinfo="percent+label")
+                    st.plotly_chart(fg, use_container_width=True)
+            with dg2:
+                st.markdown("**Settore attuale**")
+                if cur_sec:
+                    fs = px.pie(names=list(cur_sec.keys()), values=list(cur_sec.values()),
+                                hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fs.update_traces(textinfo="percent+label")
+                    st.plotly_chart(fs, use_container_width=True)
+            comp = []
+            for c, w in sorted(cur_weights.items(), key=lambda x: -x[1]):
+                e = lookup[c]
+                comp.append({"Codice": c, "Nome": e["name"],
+                             "Importo (€)": round(w * total, 2),
+                             "Peso (%)": round(w * 100, 2), "TER (%)": e["ter"],
+                             "Costo €/anno": round(w * total * e["ter"] / 100.0, 2)})
+            st.dataframe(pd.DataFrame(comp), use_container_width=True, hide_index=True)
+            custom_codes = [c for c in cur_weights if lookup[c].get("custom")]
+            if custom_codes:
+                ok = [c for c in custom_codes if lookup[c].get("meta_ok")]
+                no = [c for c in custom_codes if not lookup[c].get("meta_ok")]
+                if ok:
+                    st.info("ETF personalizzati riconosciuti da JustETF: " + ", ".join(ok))
+                if no:
+                    st.warning("ETF personalizzati non riconosciuti (esposizione/costi "
+                               "indisponibili): " + ", ".join(no))
+
         if have_prices:
             rb = rebal_mode
-            weights_p = {c: weights[c] for c in pmat.columns}
-            pseries = portfolio_price_series(pmat, weights_p, rb)
-            psr = pseries.pct_change().dropna()
-            ann_ret = float(psr.mean() * 252)
-            ann_vol = float(psr.std() * np.sqrt(252))
-            sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
-            mdd = max_drawdown(pseries)
-            returns = daily_returns(pmat).dropna()
+            twp = {c: tw.get(c, 0.0) for c in pmat.columns}
+            ssum = sum(twp.values()) or 1.0
+            twp = {k: v / ssum for k, v in twp.items()}
+            if sum(twp.values()) > 0:
+                pseries = portfolio_price_series(pmat, twp, rb)
+                psr = pseries.pct_change().dropna()
+                ann_ret = float(psr.mean() * 252)
+                ann_vol = float(psr.std() * np.sqrt(252))
+                sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
+                mdd = max_drawdown(pseries)
+                returns = daily_returns(pmat).dropna()
+                st.markdown("#### 📈 Portafoglio ribilanciato (risultante)")
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("Rend. annuo atteso", f"{ann_ret*100:.1f}%")
+                r2.metric("Volatilità", f"{ann_vol*100:.1f}%")
+                r3.metric("Sharpe", f"{sharpe:.2f}")
+                r4.metric("Max Drawdown", f"{mdd*100:.1f}%")
+                st.markdown("**🔮 Proiezione Monte Carlo (portafoglio risultante)**")
+                order = list(pmat.columns)
+                am_, ac_ = asset_annual_moments(returns, order)
+                mc = montecarlo.monte_carlo_assets(am_, ac_, twp, total, rb, (3, 5, 10, 15), n_paths=3000)
+                t = mc["t"]
+                fig_mc = go.Figure()
+                fig_mc.add_trace(go.Scatter(x=np.concatenate([t, t[::-1]]),
+                    y=np.concatenate([mc["p90"], mc["p10"][::-1]]), fill="toself",
+                    fillcolor="rgba(34,197,94,0.15)", line=dict(color="rgba(0,0,0,0)"),
+                    hoverinfo="skip", name="Scenari 10°–90°"))
+                for p in mc["sample_paths"][::4]:
+                    fig_mc.add_trace(go.Scatter(x=t, y=p, line=dict(color="gray", width=0.5),
+                        opacity=0.12, showlegend=False, hoverinfo="skip"))
+                fig_mc.add_trace(go.Scatter(x=t, y=mc["p50"], name="Atteso (50°)",
+                    line=dict(color="#2563eb", width=3)))
+                fig_mc.add_trace(go.Scatter(x=t, y=mc["p90"], name="Ottimistico (90°)",
+                    line=dict(color="#16a34a", width=2, dash="dot")))
+                fig_mc.add_trace(go.Scatter(x=t, y=mc["p10"], name="Pessimistico (10°)",
+                    line=dict(color="#dc2626", width=2, dash="dot")))
+                fig_mc.add_hline(y=total, line=dict(color="black", width=1, dash="dash"),
+                    annotation_text="Capitale iniziale")
+                fig_mc.update_layout(xaxis_title="Anni", yaxis_title="Valore (€)",
+                    height=460, legend=dict(orientation="h", y=-0.15),
+                    margin=dict(l=40, r=20, t=20, b=40))
+                st.plotly_chart(fig_mc, use_container_width=True)
+                scen = []
+                for h in (3, 5, 10, 15):
+                    s = mc["terminal"][h]
+                    scen.append({"Orizzonte": f"{h} anni",
+                                 "Pessimistico (10°)": f"{s['p10']:,.0f} €",
+                                 "Atteso (50°)": f"{s['p50']:,.0f} €",
+                                 "Ottimistico (90°)": f"{s['p90']:,.0f} €"})
+                st.dataframe(pd.DataFrame(scen), use_container_width=True, hide_index=True)
+            else:
+                st.caption("Prezzi insufficienti per simulare il portafoglio risultante.")
         else:
-            ann_ret = ann_vol = sharpe = mdd = None
-            returns = pd.DataFrame()
-
-        st.markdown(f"**Capitale totale:** {total:,.0f} €")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("TER medio", f"{wter:.3f}%")
-        m2.metric("Costo stimato", f"{cost:,.2f} €/anno")
-        if have_prices:
-            m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
-            m4.metric("Max Drawdown", f"{mdd*100:.1f}%")
-        else:
-            m3.metric("Volatilità", "n.d.")
-            m4.metric("Rend. atteso", "n.d.")
-            st.caption("Metriche storiche non disponibili (prezzi non recuperati "
-                       "o serie troppo breve). Sono comunque calcolate esposizioni e costi.")
-
-        g1, g2 = st.columns(2)
-        with g1:
-            st.markdown("#### 🌍 Esposizione Geografica")
-            if geo:
-                fig_geo = px.pie(names=list(geo.keys()), values=list(geo.values()),
-                                 hole=0.5, color_discrete_sequence=px.colors.qualitative.Set2)
-                fig_geo.update_traces(textinfo="percent+label")
-                st.plotly_chart(fig_geo, use_container_width=True)
-        with g2:
-            st.markdown("#### 🏭 Esposizione Settoriale")
-            if sec:
-                fig_sec = px.pie(names=list(sec.keys()), values=list(sec.values()),
-                                 hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
-                fig_sec.update_traces(textinfo="percent+label")
-                st.plotly_chart(fig_sec, use_container_width=True)
-
-        st.markdown("#### 📋 Composizione inserita")
-        rows_out = []
-        for c, w in sorted(weights.items(), key=lambda x: -x[1]):
-            e = lookup[c]
-            rows_out.append({
-                "Codice": c, "Nome": e["name"], "Importo (€)": round(w * total, 2),
-                "Peso (%)": round(w * 100, 2), "TER (%)": e["ter"],
-                "Costo €/anno": round(w * total * e["ter"] / 100.0, 2),
-            })
-        st.dataframe(pd.DataFrame(rows_out), use_container_width=True, hide_index=True)
-
-        # Note sugli ETF personalizzati
-        custom_codes = [c for c in weights if lookup[c].get("custom")]
-        if custom_codes:
-            ok = [c for c in custom_codes if lookup[c].get("meta_ok")]
-            no = [c for c in custom_codes if not lookup[c].get("meta_ok")]
-            if ok:
-                st.info("ETF personalizzati riconosciuti da JustETF: " + ", ".join(ok))
-            if no:
-                st.warning("ETF personalizzati non riconosciuti (esposizione/costi "
-                           "indisponibili): " + ", ".join(no) +
-                           ". Usa un ISIN valido per i metadati o un ticker yfinance per i prezzi.")
-
-        if have_prices:
-            st.markdown("#### 🔮 Proiezione Monte Carlo")
-            order = list(pmat.columns)
-            am, ac = asset_annual_moments(returns, order)
-            mc = montecarlo.monte_carlo_assets(
-                am, ac, weights_p, total, rb, (3, 5, 10, 15), n_paths=3000)
-            t = mc["t"]
-            fig_mc = go.Figure()
-            fig_mc.add_trace(go.Scatter(
-                x=np.concatenate([t, t[::-1]]),
-                y=np.concatenate([mc["p90"], mc["p10"][::-1]]),
-                fill="toself", fillcolor="rgba(34,197,94,0.15)",
-                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
-                name="Scenari 10°–90°"))
-            for p in mc["sample_paths"][::4]:
-                fig_mc.add_trace(go.Scatter(x=t, y=p, line=dict(color="gray", width=0.5),
-                                            opacity=0.12, showlegend=False, hoverinfo="skip"))
-            fig_mc.add_trace(go.Scatter(x=t, y=mc["p50"], name="Atteso (50°)",
-                                        line=dict(color="#2563eb", width=3)))
-            fig_mc.add_trace(go.Scatter(x=t, y=mc["p90"], name="Ottimistico (90°)",
-                                        line=dict(color="#16a34a", width=2, dash="dot")))
-            fig_mc.add_trace(go.Scatter(x=t, y=mc["p10"], name="Pessimistico (10°)",
-                                        line=dict(color="#dc2626", width=2, dash="dot")))
-            fig_mc.add_hline(y=total, line=dict(color="black", width=1, dash="dash"),
-                             annotation_text="Capitale iniziale")
-            fig_mc.update_layout(xaxis_title="Anni", yaxis_title="Valore portafoglio (€)",
-                                 height=460, legend=dict(orientation="h", y=-0.15),
-                                 margin=dict(l=40, r=20, t=20, b=40))
-            st.plotly_chart(fig_mc, use_container_width=True)
-            scen_rows = []
-            for h in (3, 5, 10, 15):
-                s = mc["terminal"][h]
-                scen_rows.append({
-                    "Orizzonte": f"{h} anni",
-                    "Pessimistico (10°)": f"{s['p10']:,.0f} €",
-                    "Atteso (50°)": f"{s['p50']:,.0f} €",
-                    "Ottimistico (90°)": f"{s['p90']:,.0f} €",
-                })
-            st.dataframe(pd.DataFrame(scen_rows), use_container_width=True, hide_index=True)
+            st.caption("Metriche storiche non disponibili (prezzi/serie insufficienti). "
+                       "Il piano di vendite/riacquisti è comunque valido.")
 
 
 # ===========================================================================
