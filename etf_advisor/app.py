@@ -312,13 +312,20 @@ def page_etf():
 
     # ---- Allocazione personalizzata & ottimizzazione geografica ----
     st.markdown("#### ⚖️ Allocazione e Ottimizzazione")
-    eq_override = st.slider(
-        "Peso Azionario personalizzato (%)",
-        0, 100, int(profile.equity_target * 100), 5,
-        help="Sovrascrive il target del profilo. La parte obbligazionaria "
-             "sarà 100 − Azionario.",
-    )
-    eq_target = eq_override / 100.0
+    st.markdown("**Allocazione per classe: Azionario / Obbligazionario / Materie Prime**")
+    eq_def = int(profile.equity_target * 100)
+    comm_def = 5
+    eq_alloc = st.slider("📈 Azionario (%)", 0, 100, eq_def, 5, key="alloc_eq")
+    comm_max = max(0, 100 - eq_alloc)
+    comm_val = min(st.session_state.get("alloc_comm", comm_def), comm_max)
+    comm_alloc = st.slider("🪙 Materie Prime (%)", 0, comm_max, comm_val, 1,
+                           key="alloc_comm")
+    bond_alloc = 100 - eq_alloc - comm_alloc
+    st.write(f"🏦 Obbligazionario (derivato): **{bond_alloc}%**")
+    eq_target = eq_alloc / 100.0
+    class_targets = {"Equity": eq_target,
+                     "Bond": bond_alloc / 100.0,
+                     "Alternatives": comm_alloc / 100.0}
 
     st.markdown("**🌍 Ottimizzazione geografica (sulla parte azionaria)**")
     geo_mode = st.radio(
@@ -358,16 +365,24 @@ def page_etf():
             eq_count = sum(1 for t in filtered_tickers
                            if ETF_BY_TICKER[t]["asset_class"] == "Equity")
             bd_count = len(filtered_tickers) - eq_count
-            # Vincolo equity solo se ci sono entrambe le classi
-            target = eq_target if (eq_count > 0 and bd_count > 0) else None
+            alt_count = sum(1 for t in filtered_tickers
+                            if ETF_BY_TICKER[t]["asset_class"] == "Alternatives")
 
-            weights = max_sharpe_weights(returns, rf, target, geo_target=geo_target)
+            if class_targets.get("Alternatives", 0.0) > 1e-6 and alt_count == 0:
+                st.warning("Hai richiesto una quota di **Materie Prime**, ma nessun "
+                           "ETF 'Materie Prime' è nei filtri selezionati. Aggiungi la "
+                           "categoria 'Materie Prime' (sopra) per includerla; il target "
+                           "verrà riassorbito in azionario/obbligazionario.")
+
+            weights = max_sharpe_weights(
+                returns, rf, geo_target=geo_target, class_targets=class_targets)
 
         st.session_state.portfolio = {
             "prices": prices, "returns": returns, "weights": weights,
             "profile": profile, "period": period, "use_live": use_live,
             "filtered_tickers": filtered_tickers,
             "equity_target": eq_target, "geo_mode": geo_mode,
+            "class_targets": class_targets,
         }
         st.success(f"Portafoglio calcolato con {len(weights)} ETF. "
                    f"Vai alla Pagina 3 per il report.")
@@ -419,10 +434,19 @@ def page_report():
     st.markdown(f"**Profilo:** {profile.name} · "
                 f"**Capitale:** {capital:,.0f} € · "
                 f"**Risk-free:** {rf_pct:.2f}%")
-    eq_used = port.get('equity_target', profile.equity_target)
     geo_used = port.get('geo_mode', 'Disattivata')
-    st.caption(f'Allocazione applicata: **{int(eq_used*100)}% Azionario / '
-               f'{int((1-eq_used)*100)}% Obbligazionario** · '
+    ct = port.get("class_targets")
+    if ct:
+        eq_u = int(round(ct.get("Equity", 0) * 100))
+        bd_u = int(round(ct.get("Bond", 0) * 100))
+        al_u = int(round(ct.get("Alternatives", 0) * 100))
+        alloc_txt = (f"**{eq_u}% Azionario / {bd_u}% Obbligazionario / "
+                     f"{al_u}% Materie Prime**")
+    else:
+        eq_used = port.get('equity_target', profile.equity_target)
+        alloc_txt = (f"**{int(eq_used*100)}% Azionario / "
+                     f"{int((1-eq_used)*100)}% Obbligazionario**")
+    st.caption(f'Allocazione applicata: {alloc_txt} · '
                f'Ottimizzazione geografica: **{geo_used}**')
 
     # ---- Metriche di portafoglio (coerenti con la politica di ribilanciamento) ----
@@ -456,8 +480,8 @@ def page_report():
 
     st.divider()
 
-    # ---- Allocazione geografica & settoriale ----
-    g1, g2 = st.columns(2)
+    # ---- Allocazione geografica, settoriale e per classe ----
+    g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("#### 🌍 Esposizione Geografica")
         geo = aggregate_exposure(weights, "region")
@@ -480,6 +504,23 @@ def page_report():
             )
             fig_sec.update_traces(textinfo="percent+label")
             st.plotly_chart(fig_sec, use_container_width=True)
+    with g3:
+        st.markdown("#### ⚖️ Allocazione per Classe")
+        cls_labels = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                      "Alternatives": "Materie Prime"}
+        cls_w = {}
+        for t, w in weights.items():
+            c = ETF_BY_TICKER[t]["asset_class"]
+            lbl = cls_labels.get(c, c)
+            cls_w[lbl] = cls_w.get(lbl, 0.0) + w
+        if cls_w:
+            fig_cls = px.pie(
+                names=list(cls_w.keys()), values=list(cls_w.values()),
+                hole=0.5, title="",
+                color_discrete_sequence=px.colors.qualitative.Set1,
+            )
+            fig_cls.update_traces(textinfo="percent+label")
+            st.plotly_chart(fig_cls, use_container_width=True)
 
     st.divider()
 
@@ -730,6 +771,17 @@ def page_my_portfolio():
         use_container_width=True, key="portfolio_editor",
     )
 
+    # Ribilanciamento del portafoglio personale
+    _rb_map = {"Nessuno": "none", "Annuale": "annual",
+               "Trimestrale": "quarterly", "Mensile": "monthly"}
+    rebal_label = st.selectbox(
+        "🔄 Politica di ribilanciamento",
+        list(_rb_map.keys()), index=0,
+        help="Ribilanciamento periodico del tuo portafoglio: riconduce i pesi "
+             "al target a intervalli fissi.",
+    )
+    rebal_mode = _rb_map[rebal_label]
+
     if st.button("📊 Analizza il mio portafoglio", type="primary"):
         rows = [r for _, r in edited.iterrows()
                 if str(r.get("Codice", "")).strip() and (r.get("Importo (€)") or 0) > 0]
@@ -778,7 +830,7 @@ def page_my_portfolio():
             pd.DataFrame(price_cols).dropna().shape[0] > 20
         pmat = pd.DataFrame(price_cols).dropna() if price_cols else pd.DataFrame()
         if have_prices:
-            rb = st.session_state.get("rebalance", "none")
+            rb = rebal_mode
             weights_p = {c: weights[c] for c in pmat.columns}
             pseries = portfolio_price_series(pmat, weights_p, rb)
             psr = pseries.pct_change().dropna()
