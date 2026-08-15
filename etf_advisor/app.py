@@ -596,6 +596,9 @@ def page_report():
         margin=dict(l=40, r=20, t=20, b=40),
     )
     st.plotly_chart(fig_mc, use_container_width=True)
+    st.caption(f"Politica di ribilanciamento applicata: **{REBALANCE_LABELS.get(rb, rb)}** "
+               f"— i pesi vengono riallineati al target con questa frequenza in ogni "
+               f"percorso simulato (impostata nella sidebar).")
 
     # Tabella scenari
     st.markdown("##### Risultati per orizzonte")
@@ -757,6 +760,11 @@ DEFAULT_SEC = {"Tecnologia": 22, "Finanziari": 16, "Salute": 14, "Industria": 11
                "Energia": 5, "Utilities": 4, "Materiali": 4,
                "Comunicazioni": 3, "Real Estate": 2}
 
+# Etichette della politica di ribilanciamento (sidebar) per le didascalie MC
+REBALANCE_LABELS = {"none": "Nessuna (buy & hold)", "annual": "Annuale",
+                     "quarterly": "Trimestrale", "trimestrale": "Trimestrale",
+                     "monthly": "Mensile"}
+
 
 def _solve_target_weights(etfs, class_target, geo_target, sector_target, geo_w=1.0, sec_w=1.0):
     """Pesi sugli ETF attuali che rispettano l'obiettivo di **classe** come
@@ -897,6 +905,8 @@ def _render_worst_case(asset_mu, asset_cov, weights, capital, rb,
         legend=dict(orientation="h", y=-0.15),
         margin=dict(l=40, r=20, t=20, b=40))
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Politica di ribilanciamento applicata: **{REBALANCE_LABELS.get(rb, rb)}** "
+               f"— stesso regime dello scenario normale.")
 
     rows = []
     for h in (3, 5, 10, 15):
@@ -1226,6 +1236,8 @@ def page_my_portfolio():
                     height=460, legend=dict(orientation="h", y=-0.15),
                     margin=dict(l=40, r=20, t=20, b=40))
                 st.plotly_chart(fig_mc, use_container_width=True)
+                st.caption(f"Politica di ribilanciamento applicata: **{REBALANCE_LABELS.get(rb, rb)}** "
+                           f"— riallineamento al target con questa frequenza in ogni percorso simulato.")
                 scen = []
                 for h in (3, 5, 10, 15):
                     s = mc["terminal"][h]
@@ -1585,6 +1597,8 @@ def page_personal_report():
                 height=460, legend=dict(orientation="h", y=-0.15),
                 margin=dict(l=40, r=20, t=20, b=40))
             st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"Politica di ribilanciamento applicata: **{REBALANCE_LABELS.get(rb, rb)}** "
+                       f"— riallineamento al target con questa frequenza in ogni percorso simulato.")
 
             # Tabella scenari normali
             norm_rows = []
