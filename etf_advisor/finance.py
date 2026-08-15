@@ -22,6 +22,26 @@ from etf_universe import ETF_BY_TICKER
 MACRO_BUCKETS = ["USA", "Europa", "Pacifico", "Emergenti",
                  "Altri Sviluppati", "Obbligazionario"]
 
+# 6 macro-aree geografiche coerenti con l'ottimizzatore di Pagina 2/4.
+GEO_KEYS = ["USA", "Europa", "Giappone", "Emergenti", "Pacifico Sviluppato",
+            "Altri Sviluppati"]
+# 11 settori coerenti con l'ottimizzatore di Pagina 2/4.
+SECTOR_KEYS = ["Tecnologia", "Finanziari", "Salute", "Industria",
+              "Consumi Discrezionali", "Staples (Beni di Base)", "Energia",
+              "Utilities", "Materiali", "Comunicazioni", "Real Estate"]
+
+# Mappa esposizioni regionali dell'ETF -> 6 GEO_KEYS (usate da Pagina 2/4)
+REGION_TO_GEO = {
+    "USA": "USA", "Stati Uniti": "USA",
+    "Europa": "Europa", "Germania": "Europa", "Francia": "Europa",
+    "Regno Unito": "Europa", "Svizzera": "Altri Sviluppati",
+    "Giappone (Pacifico)": "Giappone", "Giappone": "Giappone",
+    "Emergenti": "Emergenti", "Cina": "Emergenti", "India": "Emergenti",
+    "Pacifico Sviluppato": "Pacifico Sviluppato",
+    "Altri Sviluppati": "Altri Sviluppati",
+    "Sviluppati (Global REIT)": "Altri Sviluppati", "Globale": "Altri Sviluppati",
+}
+
 REGION_TO_MACRO = {
     "USA": "USA",
     "Europa": "Europa",
@@ -78,6 +98,25 @@ def etf_macro_vector(etf: dict) -> dict:
     for region, frac in etf.get("region", {}).items():
         b = REGION_TO_MACRO.get(region, "Altri Sviluppati")
         vec[b] += frac
+    return vec
+
+
+def etf_geo_vector(etf: dict) -> dict:
+    """Vettore dell'ETF nei 6 macro-bucket geografici (GEO_KEYS)."""
+    vec = {b: 0.0 for b in GEO_KEYS}
+    for region, frac in etf.get("region", {}).items():
+        b = REGION_TO_GEO.get(region)
+        if b:
+            vec[b] += frac
+    return vec
+
+
+def etf_sector_vector(etf: dict) -> dict:
+    """Vettore dell'ETF nei 11 settori (SECTOR_KEYS)."""
+    vec = {b: 0.0 for b in SECTOR_KEYS}
+    for s, frac in etf.get("sectors", {}).items():
+        if s in vec:
+            vec[s] += frac
     return vec
 
 

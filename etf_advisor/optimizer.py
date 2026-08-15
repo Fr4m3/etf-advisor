@@ -23,7 +23,10 @@ from etf_universe import ETF_BY_TICKER
 
 
 from etf_universe import ETF_BY_TICKER
-from finance import etf_macro_vector, MACRO_BUCKETS
+from finance import (
+    etf_macro_vector, MACRO_BUCKETS,
+    etf_geo_vector, etf_sector_vector, GEO_KEYS, SECTOR_KEYS,
+)
 
 
 def max_sharpe_weights(
@@ -36,6 +39,9 @@ def max_sharpe_weights(
     min_weight: float = 0.0,
     class_targets: dict | None = None,
     class_tol: float = 0.02,
+    sector_target: dict | None = None,
+    geo_w: float = 10.0,
+    sec_w: float = 10.0,
 ) -> dict:
     """Calcola i pesi ottimali (Max Sharpe) su `returns`.
 
@@ -71,14 +77,32 @@ def max_sharpe_weights(
     bond_idx = _mask("Bond")
     alt_idx = _mask("Alternatives")
     # Vettore macro-geografico per ogni colonna
-    macro_vecs = [etf_macro_vector(ETF_BY_TICKER.get(c, {})) for c in cols]
+    geo_vecs = [etf_geo_vector(ETF_BY_TICKER.get(c, {})) for c in cols]
+    sec_vecs = [etf_sector_vector(ETF_BY_TICKER.get(c, {})) for c in cols]
 
     def neg_sharpe(w):
         ret = float(w @ mu)
         vol = float(np.sqrt(w @ cov @ w))
         if vol <= 1e-9:
             return 1e6
-        return -(ret - rf) / vol
+        sharpe = -(ret - rf) / vol
+        pen = 0.0
+        if geo_target and eq_for_geo is not None and equity_idx.sum() > 0:
+            eqw = max(1e-6, float(w @ equity_idx))
+            for b in GEO_KEYS:
+                if b not in geo_target:
+                    continue
+                g = float(sum(w[i] * equity_idx[i] * geo_vecs[i].get(b, 0.0)
+                              for i in range(n)))
+                pen += geo_w * (g - geo_target[b] * eqw) ** 2
+        if sector_target:
+            for k in SECTOR_KEYS:
+                if k not in sector_target:
+                    continue
+                s = float(sum(w[i] * sec_vecs[i].get(k, 0.0)
+                              for i in range(n)))
+                pen += sec_w * (s - sector_target[k]) ** 2
+        return sharpe + pen
 
     # Vincolo somma = 1
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
@@ -122,21 +146,9 @@ def max_sharpe_weights(
         constraints.append(
             {"type": "ineq", "fun": lambda w: (equity_idx @ w) - lo})
 
-    # ---- Vincoli geografici sulla PARTE AZIONARIA ----
-    if geo_target and eq_for_geo is not None and equity_idx.sum() > 0:
-        for b, target_frac in geo_target.items():
-            if b not in MACRO_BUCKETS:
-                continue
-            coeff = np.array(
-                [equity_idx[i] * macro_vecs[i].get(b, 0.0) for i in range(n)]
-            )
-            val = target_frac * eq_for_geo
-            lo_g = max(0.0, val - geo_tol)
-            hi_g = min(1.0, val + geo_tol)
-            constraints.append(
-                {"type": "ineq", "fun": lambda w, c=coeff, h=hi_g: h - (c @ w)})
-            constraints.append(
-                {"type": "ineq", "fun": lambda w, c=coeff, l=lo_g: (c @ w) - l})
+    # (i vincoli geografici e settoriali sono gestiti come soft-penalty
+    #  all'interno di neg_sharpe, così gli slider guidano il portafoglio
+    #  senza rendere il problema di ottimizzazione infattibile)
 
     bounds = [(min_weight, 1.0) for _ in range(n)]
 

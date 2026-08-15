@@ -31,7 +31,7 @@ import data_fetcher
 from finance import (
     daily_returns, portfolio_annual_metrics, portfolio_price_series,
     max_drawdown, weighted_ter, weighted_cost_eur, aggregate_exposure,
-    asset_annual_moments,
+    asset_annual_moments, etf_geo_vector, etf_sector_vector,
 )
 from optimizer import max_sharpe_weights
 import montecarlo
@@ -329,35 +329,28 @@ def page_etf():
                      "Bond": bond_alloc / 100.0,
                      "Alternatives": comm_alloc / 100.0}
 
-    st.markdown("**🌍 Ottimizzazione geografica (sulla parte azionaria)**")
-    geo_mode = st.radio(
-        "Strategia geografica",
-        ["Disattivata", "Market-cap globale", "Home bias Europa",
-         "Solo Sviluppati", "Personalizzata"],
-        horizontal=True,
-    )
-    geo_presets = {
-        "Market-cap globale": {"USA": 0.60, "Europa": 0.15, "Pacifico": 0.10,
-                               "Emergenti": 0.12, "Altri Sviluppati": 0.03},
-        "Home bias Europa": {"USA": 0.35, "Europa": 0.45, "Pacifico": 0.07,
-                             "Emergenti": 0.10, "Altri Sviluppati": 0.03},
-        "Solo Sviluppati": {"USA": 0.65, "Europa": 0.15, "Pacifico": 0.15,
-                            "Emergenti": 0.0, "Altri Sviluppati": 0.05},
-    }
-    geo_target = None
-    if geo_mode == "Personalizzata":
-        g1, g2, g3, g4 = st.columns(4)
-        usa = g1.slider("USA %", 0, 100, 60, 5)
-        eur = g2.slider("Europa %", 0, 100, 15, 5)
-        eme = g3.slider("Emergenti %", 0, 100, 12, 5)
-        pac = g4.slider("Pacifico %", 0, 100, 10, 5)
-        s = usa + eur + eme + pac
-        if s > 0:
-            geo_target = {"USA": usa / s, "Europa": eur / s,
-                          "Emergenti": eme / s, "Pacifico": pac / s}
-        st.caption(f"Somma slider: {s}% (normalizzata automaticamente)")
-    elif geo_mode in geo_presets:
-        geo_target = geo_presets[geo_mode]
+    # ---- Geografia (6 macro-aree) e Settoriale (11 settori) ----
+    st.markdown("**🌍 Geografia (6 macro-aree, normalizzata a 100%)**")
+    gcols = st.columns(3)
+    geo_raw = {}
+    for i, k in enumerate(GEO_KEYS):
+        with gcols[i % 3]:
+            geo_raw[k] = st.slider(k, 0, 100, int(DEFAULT_GEO[k]), 1,
+                                   key="p2_geo_" + k)
+    gs = sum(geo_raw.values()) or 1
+    geo_target = {k: v / gs for k, v in geo_raw.items()}
+
+    st.markdown("**🏭 Settoriale (11 settori, normalizzata a 100%)**")
+    scols = st.columns(3)
+    sec_raw = {}
+    for i, k in enumerate(SECTOR_KEYS):
+        with scols[i % 3]:
+            sec_raw[k] = st.slider(k, 0, 100, int(DEFAULT_SEC[k]), 1,
+                                   key="p2_sec_" + k)
+    ss = sum(sec_raw.values()) or 1
+    sector_target = {k: v / ss for k, v in sec_raw.items()}
+    st.caption("Le percentuali sono normalizzate automaticamente: puoi esprimere "
+               "preferenze relative (es. 'voglio più Tech e meno Energia').")
 
     if st.button("🚀 Calcola portafoglio ottimale (Max Sharpe)", type="primary"):
         with st.spinner("Ottimizzazione in corso…"):
@@ -376,19 +369,52 @@ def page_etf():
                            "categoria 'Materie Prime' (sopra) per includerla; il target "
                            "verrà riassorbito in azionario/obbligazionario.")
 
-            weights = max_sharpe_weights(
-                returns, rf, geo_target=geo_target, class_targets=class_targets)
+            weights = _generate_personal_portfolio(
+                filtered, class_targets, geo_target, sector_target)
 
         st.session_state.portfolio = {
             "prices": prices, "returns": returns, "weights": weights,
             "profile": profile, "period": period, "use_live": use_live,
             "filtered_tickers": filtered_tickers,
-            "equity_target": eq_target, "geo_mode": geo_mode,
+            "equity_target": eq_target, "geo_mode": "Slider (Pagina 2)",
             "class_targets": class_targets,
+            "geo_target": geo_target, "sector_target": sector_target,
         }
         st.success(f"Portafoglio calcolato con {len(weights)} ETF. "
                    f"Vai alla Pagina 3 per il report.")
         _show_weights_table(weights, capital)
+
+        # Obiettivo vs Raggiunto
+        ach_geo = {k: 0.0 for k in GEO_KEYS}
+        ach_sec = {k: 0.0 for k in SECTOR_KEYS}
+        ach_class = {"Azionario": 0.0, "Obbligazionario": 0.0, "Materie Prime": 0.0}
+        for t, wv in weights.items():
+            e = ETF_BY_TICKER.get(t, {})
+            a = e.get("asset_class")
+            lbl = {"Equity": "Azionario", "Bond": "Obbligazionario",
+                   "Alternatives": "Materie Prime"}.get(a, a)
+            ach_class[lbl] = ach_class.get(lbl, 0.0) + wv
+            for k, v in etf_geo_vector(e).items():
+                ach_geo[k] = ach_geo.get(k, 0.0) + wv * v
+            for k, v in etf_sector_vector(e).items():
+                ach_sec[k] = ach_sec.get(k, 0.0) + wv * v
+        class_lbl = {"Azionario": class_targets["Equity"],
+                     "Obbligazionario": class_targets["Bond"],
+                     "Materie Prime": class_targets["Alternatives"]}
+        st.markdown("#### 🎯 Obiettivo vs Raggiunto")
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            st.markdown("**Classe**")
+            st.plotly_chart(_compare_chart(class_lbl, ach_class, ""),
+                            use_container_width=True)
+        with cc2:
+            st.markdown("**Geografia**")
+            st.plotly_chart(_compare_chart(geo_target, ach_geo, ""),
+                            use_container_width=True)
+        with cc3:
+            st.markdown("**Settore**")
+            st.plotly_chart(_compare_chart(sector_target, ach_sec, ""),
+                            use_container_width=True)
 
     elif st.session_state.portfolio is not None:
         st.info("Portafoglio già calcolato. Ricalcola per applicare i nuovi filtri "
