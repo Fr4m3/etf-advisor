@@ -85,12 +85,16 @@ with st.sidebar:
 
     page = st.radio(
         "Navigazione",
-        ["1 · Questionario", "2 · ETF Consigliati", "3 · Report & Dashboard"],
-        index=["questionario", "etf", "report"].index(st.session_state.page),
+        ["1 · Questionario", "2 · ETF Consigliati", "3 · Report & Dashboard",
+         "4 · Il mio portafoglio"],
+        index=["questionario", "etf", "report", "myportfolio"].index(st.session_state.page),
     )
-    st.session_state.page = {"1 · Questionario": "questionario",
-                             "2 · ETF Consigliati": "etf",
-                             "3 · Report & Dashboard": "report"}[page]
+    st.session_state.page = {
+        "1 · Questionario": "questionario",
+        "2 · ETF Consigliati": "etf",
+        "3 · Report & Dashboard": "report",
+        "4 · Il mio portafoglio": "myportfolio",
+    }[page]
 
     st.divider()
     capital = st.number_input("Capitale iniziale (€)", 100, 10_000_000, 10_000, 500)
@@ -241,6 +245,10 @@ def page_etf():
     period = st.selectbox("Storico per ottimizzazione", ["3y", "5y", "10y"], index=1)
     use_live = st.checkbox("Usa dati di mercato reali (Yahoo Finance)", value=True)
 
+    # Categorie (settoriali / real estate / materie prime / broad / bond)
+    all_cats = sorted({e["category"] for e in ETF_UNIVERSE})
+    cats = st.multiselect("Categorie ETF da includere", all_cats, default=all_cats)
+
     # ---- Metadati live da JustETF ----
     st.markdown("#### 🔄 Metadati live (JustETF)")
     st.caption("Aggiorna TER e dimensione fondo dagli ISIN ufficiali. In caso di "
@@ -267,6 +275,7 @@ def page_etf():
         if (e["accumulation"] or not only_acc)
         and e["fund_size_m"] >= min_size
         and e["ter"] <= max_ter
+        and e["category"] in cats
     ]
     # (Tutti gli ETF dell'universo sono UCITS per costruzione)
     st.caption("✅ Filtro UCITS attivo: tutti gli ETF dell'universo sono conformi "
@@ -282,7 +291,8 @@ def page_etf():
     st.markdown("#### Universo selezionabile (dopo i filtri)")
     tbl = pd.DataFrame([{
         "Ticker": e["ticker"], "ISIN": e["isin"], "Nome": e["name"],
-        "Classe": e["asset_class"], "TER (%)": e["ter"],
+        "Classe": e["asset_class"], "Categoria": e["category"],
+        "TER (%)": e["ter"],
         "Dim. (M€)": e["fund_size_m"], "Accumulo": "Sì" if e["accumulation"] else "No",
     } for e in filtered])
     st.dataframe(tbl, use_container_width=True, hide_index=True)
@@ -609,6 +619,150 @@ def page_report():
 
 
 # ===========================================================================
+# PAGINA 4 — IL MIO PORTAFOGLIO (analisi holdings inseriti dall'utente)
+# ===========================================================================
+def page_my_portfolio():
+    st.markdown('<div class="big-title">4 · Il mio portafoglio</div>',
+                unsafe_allow_html=True)
+    st.markdown("Inserisci gli ETF che possiedi e l'importo investito: il sistema "
+                "calcola esposizione **geografica** e **settoriale**, i **costi (TER)** "
+                "e — se i prezzi sono disponibili — **Sharpe, volatilità e drawdown** "
+                "del *tuo* portafoglio.")
+
+    if "my_holdings" not in st.session_state:
+        st.session_state.my_holdings = []
+    df0 = (pd.DataFrame(st.session_state.my_holdings)
+           if st.session_state.my_holdings
+           else pd.DataFrame(columns=["Ticker", "Importo (€)"]))
+    edited = st.data_editor(
+        df0, num_rows="dynamic",
+        column_config={
+            "Ticker": st.column_config.SelectboxColumn(
+                "ETF", options=[e["ticker"] for e in ETF_UNIVERSE], required=True),
+            "Importo (€)": st.column_config.NumberColumn(
+                "Importo investito (€)", min_value=0, step=100),
+        },
+        use_container_width=True, key="holdings_editor",
+    )
+    st.session_state.my_holdings = edited.to_dict("records")
+
+    if st.button("📊 Analizza il mio portafoglio", type="primary"):
+        holdings = [{"ticker": r["Ticker"], "amount": float(r["Importo (€)"] or 0)}
+                    for _, r in edited.iterrows()
+                    if r.get("Ticker") and (r.get("Importo (€)") or 0) > 0]
+        if not holdings:
+            st.warning("Aggiungi almeno un ETF con importo > 0.")
+            return
+        total = sum(h["amount"] for h in holdings)
+        weights = {h["ticker"]: h["amount"] / total for h in holdings}
+
+        # Esposizioni e costi (da metadati di riferimento)
+        geo = aggregate_exposure(weights, "region")
+        sec = aggregate_exposure(weights, "sectors")
+        wter = weighted_ter(weights)
+        cost = weighted_cost_eur(weights, total)
+
+        # Metriche storiche (se i prezzi ci sono)
+        rb = st.session_state.get("rebalance", "none")
+        tickers = list(weights.keys())
+        prices = _cached_prices(tuple(tickers), "5y", True)
+        returns = daily_returns(prices).dropna()
+        have_prices = len(returns) > 20 and returns.shape[1] > 0
+        if have_prices:
+            pseries = portfolio_price_series(prices, weights, rb)
+            psr = pseries.pct_change().dropna()
+            ann_ret = float(psr.mean() * 252)
+            ann_vol = float(psr.std() * np.sqrt(252))
+            sharpe = (ann_ret - rf) / ann_vol if ann_vol > 0 else 0.0
+            mdd = max_drawdown(pseries)
+        else:
+            ann_ret = ann_vol = sharpe = mdd = None
+
+        st.markdown(f"**Capitale totale:** {total:,.0f} €")
+        # Metriche
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("TER medio", f"{wter:.3f}%")
+        m2.metric("Costo stimato", f"{cost:,.2f} €/anno")
+        if have_prices:
+            m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+            m4.metric("Max Drawdown", f"{mdd*100:.1f}%")
+        else:
+            m3.metric("Volatilità", "n.d.")
+            m4.metric("Rend. atteso", "n.d.")
+            st.caption("Metriche storiche non disponibili (prezzi non recuperati "
+                       "o serie troppo breve). Sono comunque calcolate esposizioni e costi.")
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("#### 🌍 Esposizione Geografica")
+            if geo:
+                fig_geo = px.pie(names=list(geo.keys()), values=list(geo.values()),
+                                 hole=0.5, color_discrete_sequence=px.colors.qualitative.Set2)
+                fig_geo.update_traces(textinfo="percent+label")
+                st.plotly_chart(fig_geo, use_container_width=True)
+        with g2:
+            st.markdown("#### 🏭 Esposizione Settoriale")
+            if sec:
+                fig_sec = px.pie(names=list(sec.keys()), values=list(sec.values()),
+                                 hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig_sec.update_traces(textinfo="percent+label")
+                st.plotly_chart(fig_sec, use_container_width=True)
+
+        # Tabella holdings
+        st.markdown("#### 📋 Composizione inserita")
+        rows = []
+        for t, w in sorted(weights.items(), key=lambda x: -x[1]):
+            e = ETF_BY_TICKER[t]
+            rows.append({
+                "Ticker": t, "Nome": e["name"], "Importo (€)": round(w * total, 2),
+                "Peso (%)": round(w * 100, 2), "TER (%)": e["ter"],
+                "Costo €/anno": round(w * total * e["ter"] / 100.0, 2),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Monte Carlo (solo se abbiamo i prezzi)
+        if have_prices:
+            st.markdown("#### 🔮 Proiezione Monte Carlo")
+            order = list(weights.keys())
+            am, ac = asset_annual_moments(returns, order)
+            mc = montecarlo.monte_carlo_assets(
+                am, ac, weights, total, rb, (3, 5, 10, 15), n_paths=3000)
+            t = mc["t"]
+            fig_mc = go.Figure()
+            fig_mc.add_trace(go.Scatter(
+                x=np.concatenate([t, t[::-1]]),
+                y=np.concatenate([mc["p90"], mc["p10"][::-1]]),
+                fill="toself", fillcolor="rgba(34,197,94,0.15)",
+                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+                name="Scenari 10°–90°"))
+            for p in mc["sample_paths"][::4]:
+                fig_mc.add_trace(go.Scatter(x=t, y=p, line=dict(color="gray", width=0.5),
+                                            opacity=0.12, showlegend=False, hoverinfo="skip"))
+            fig_mc.add_trace(go.Scatter(x=t, y=mc["p50"], name="Atteso (50°)",
+                                        line=dict(color="#2563eb", width=3)))
+            fig_mc.add_trace(go.Scatter(x=t, y=mc["p90"], name="Ottimistico (90°)",
+                                        line=dict(color="#16a34a", width=2, dash="dot")))
+            fig_mc.add_trace(go.Scatter(x=t, y=mc["p10"], name="Pessimistico (10°)",
+                                        line=dict(color="#dc2626", width=2, dash="dot")))
+            fig_mc.add_hline(y=total, line=dict(color="black", width=1, dash="dash"),
+                             annotation_text="Capitale iniziale")
+            fig_mc.update_layout(xaxis_title="Anni", yaxis_title="Valore portafoglio (€)",
+                                 height=460, legend=dict(orientation="h", y=-0.15),
+                                 margin=dict(l=40, r=20, t=20, b=40))
+            st.plotly_chart(fig_mc, use_container_width=True)
+            scen_rows = []
+            for h in (3, 5, 10, 15):
+                s = mc["terminal"][h]
+                scen_rows.append({
+                    "Orizzonte": f"{h} anni",
+                    "Pessimistico (10°)": f"{s['p10']:,.0f} €",
+                    "Atteso (50°)": f"{s['p50']:,.0f} €",
+                    "Ottimistico (90°)": f"{s['p90']:,.0f} €",
+                })
+            st.dataframe(pd.DataFrame(scen_rows), use_container_width=True, hide_index=True)
+
+
+# ===========================================================================
 # ROUTER
 # ===========================================================================
 if st.session_state.page == "questionario":
@@ -617,3 +771,5 @@ elif st.session_state.page == "etf":
     page_etf()
 elif st.session_state.page == "report":
     page_report()
+elif st.session_state.page == "myportfolio":
+    page_my_portfolio()

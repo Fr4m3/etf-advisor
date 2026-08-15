@@ -33,6 +33,8 @@ REGION_TO_MACRO = {
     "Obbligazionario Eurozona": "Obbligazionario",
     "Obbligazionario Eurozona (Corp)": "Obbligazionario",
     "Obbligazionario Globale Corp (hedged EUR)": "Obbligazionario",
+    "Sviluppati (Global REIT)": "Altri Sviluppati",
+    "Globale": "Altri Sviluppati",
 }
 
 
