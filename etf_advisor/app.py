@@ -673,12 +673,12 @@ def page_my_portfolio():
                "settoriale e TER da JustETF; incolla un ticker yfinance (es. VWCE.DE) "
                "per ottenere anche le serie storiche dei prezzi.")
 
-    if "holdings_editor" not in st.session_state:
-        st.session_state["holdings_editor"] = pd.DataFrame(columns=["Codice", "Importo (€)"])
+    if "portfolio_holdings" not in st.session_state:
+        st.session_state["portfolio_holdings"] = pd.DataFrame(columns=["Codice", "Importo (€)"])
 
     def _append(code, amt):
-        df = st.session_state["holdings_editor"]
-        st.session_state["holdings_editor"] = pd.concat(
+        df = st.session_state["portfolio_holdings"]
+        st.session_state["portfolio_holdings"] = pd.concat(
             [df, pd.DataFrame([{"Codice": code, "Importo (€)": amt}])],
             ignore_index=True)
 
@@ -708,13 +708,13 @@ def page_my_portfolio():
             _append(cust.strip().upper(), cust_amt)
 
     edited = st.data_editor(
-        st.session_state["holdings_editor"], num_rows="dynamic",
+        st.session_state["portfolio_holdings"], num_rows="dynamic",
         column_config={
             "Codice": st.column_config.TextColumn("ISIN / Ticker"),
             "Importo (€)": st.column_config.NumberColumn("Importo investito (€)",
                                                          min_value=0, step=100),
         },
-        use_container_width=True, key="holdings_editor",
+        use_container_width=True, key="portfolio_editor",
     )
 
     if st.button("📊 Analizza il mio portafoglio", type="primary"):
