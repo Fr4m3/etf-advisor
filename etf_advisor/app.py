@@ -135,13 +135,17 @@ def page_questionnaire():
     st.markdown(f"### {q['question']}")
     opts = [o["label"] for o in q["options"]]
     current = st.session_state.q_answers[q["id"]]
+    # default_idx=0 se nessuna risposta ancora selezionata (evita index=None
+    # che su Streamlit recenti restituisce None e fa crashare opts.index)
     default_idx = next((i for i, o in enumerate(q["options"])
-                        if o["score"] == current), None)
+                        if o["score"] == current), 0)
 
     choice = st.radio(
         "Scegli la risposta che ti rappresenta meglio:",
         opts, index=default_idx, key=f"radio_{q['id']}",
     )
+    if choice is None:          # sicurezza aggiuntiva su versioni diverse
+        choice = opts[0]
     # Salva il punteggio della risposta scelta
     chosen = q["options"][opts.index(choice)]
     st.session_state.q_answers[q["id"]] = chosen["score"]
